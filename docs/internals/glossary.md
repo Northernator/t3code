@@ -11,6 +11,7 @@ This is a living glossary for T3 Code. It explains what common terms mean in thi
 - [Orchestration](#orchestration)
 - [Provider runtime](#provider-runtime)
 - [Checkpointing](#checkpointing)
+- [Foundry governance](#foundry-governance)
 
 ## Concepts
 
@@ -140,6 +141,30 @@ The patch difference between two checkpoints. Query logic lives in [CheckpointDi
 
 The file patch and changed-file summary for one turn. It is usually computed in [CheckpointDiffQuery.ts][20], represented in [the contracts][1], and recorded into thread state by [projector.ts][4].
 
+### Foundry governance
+
+Foundry is the fork-owned, two-founder governance boundary around T3. It decides whether agreed work
+may be dispatched; it does not replace T3's environment-local orchestration. See
+[foundry-governance.md][25].
+
+#### Feature contract
+
+An immutable, canonical description of one feature revision: objective, scope, constraints,
+acceptance criteria, repository base commit, execution assignment, and limits. Its SHA-256 content
+hash is the subject both founders approve. Editing any field creates a new revision and invalidates
+earlier approvals.
+
+#### Dispatch
+
+A deterministic request to execute one fully approved feature contract in one allowed environment.
+Its idempotency key prevents a runner reconnect or event replay from creating duplicate T3 work.
+
+#### Local runner
+
+A process controlled by one founder that independently verifies Foundry approval events, resolves
+logical assignments to local project paths and provider instances, and sends a supervised turn to
+that machine's T3 server. Provider credentials and local paths remain outside the shared contract.
+
 ## Practical Shortcuts
 
 - If you see `requested`, think "intent recorded".
@@ -179,3 +204,4 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../../apps/server/src/checkpointing/Utils.ts
 [23]: ../../apps/server/src/checkpointing/Diffs.ts
 [24]: ./overview.md
+[25]: ./foundry-governance.md

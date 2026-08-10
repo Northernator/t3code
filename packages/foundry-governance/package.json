@@ -1,0 +1,21 @@
+{
+  "name": "@t3tools/foundry-governance",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/Governance.ts",
+      "import": "./src/Governance.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "vp test run"
+  },
+  "dependencies": {
+    "@noble/hashes": "catalog:"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  }
+}
