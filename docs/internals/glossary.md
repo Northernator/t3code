@@ -165,6 +165,19 @@ A process controlled by one founder that independently verifies Foundry approval
 logical assignments to local project paths and provider instances, and sends a supervised turn to
 that machine's T3 server. Provider credentials and local paths remain outside the shared contract.
 
+#### Approval proof
+
+An opaque, format-labelled signed event that proves one registered founder approved the exact
+domain-separated subject of a feature contract. The first supported format is a Buzz/Nostr stream
+message. A receiver strictly decodes the event, recomputes its NIP-01 event ID, verifies its Schnorr
+signature and registered signer key, and matches its signed content to the locally derived contract
+subject. Event time is evidence, not unsigned policy state.
+
+#### Founder registry
+
+The ordered pair of founder IDs and signing public keys trusted by a Foundry installation. Its hash
+is part of every approval subject, so changing a founder, key, or ordering requires fresh approvals.
+
 ## Practical Shortcuts
 
 - If you see `requested`, think "intent recorded".
