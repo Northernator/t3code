@@ -155,6 +155,14 @@ function prepareVerifiedContract(input: {
     canonicalBodyJson: proposal.canonicalBody,
     packetJson,
     packetDigest: packetDigestFor(packetJson),
+    dispatch: {
+      dispatchId: dispatch.id,
+      dispatchIdempotencyKey: dispatch.idempotencyKey,
+      environmentId: dispatch.environmentId,
+      branch: dispatch.branch,
+      baseSha: dispatch.baseSha,
+      maxAttempts: proposal.body.execution.limits.maximumRetries + 1,
+    },
     approvals: [
       storageApproval(firstEvidence, firstApproval),
       storageApproval(secondEvidence, secondApproval),

@@ -1,9 +1,8 @@
 import {
-  decodeFoundryApprovedContractPacket,
+  FoundryApprovedContractPacket,
   FoundryApprovedContractRecord,
   FoundryStoredApprovalEvidence,
   type FoundryApprovedContractIngestResult,
-  type FoundryApprovedContractPacket,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -60,6 +59,9 @@ const InsertedContractRow = Schema.Struct({
   contractHash: FoundryApprovedContractRecord.fields.contractHash,
 });
 const decodeApprovedContractRecord = Schema.decodeUnknownEffect(FoundryApprovedContractRecord);
+const decodeStoredApprovedContractPacket = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(FoundryApprovedContractPacket),
+);
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown): PersistenceSqlError | PersistenceDecodeError =>
@@ -159,6 +161,49 @@ const makeFoundryApprovedContractStore = Effect.gen(function* () {
     `,
   });
 
+  const insertDispatchJob = SqlSchema.void({
+    Request: StoreVerifiedFoundryApprovedContractInput,
+    execute: (input) => sql`
+      INSERT INTO foundry_dispatch_jobs (
+        dispatch_id,
+        dispatch_idempotency_key,
+        contract_hash,
+        environment_id,
+        branch,
+        base_sha,
+        state,
+        fence_token,
+        attempt_count,
+        max_attempts,
+        lease_owner,
+        lease_expires_at,
+        command_created_at,
+        created_at,
+        updated_at,
+        completed_at,
+        failure_code
+      ) VALUES (
+        ${input.dispatch.dispatchId},
+        ${input.dispatch.dispatchIdempotencyKey},
+        ${input.record.contractHash},
+        ${input.dispatch.environmentId},
+        ${input.dispatch.branch},
+        ${input.dispatch.baseSha},
+        ${"queued"},
+        ${0},
+        ${0},
+        ${input.dispatch.maxAttempts},
+        ${null},
+        ${null},
+        ${input.record.acceptedAt},
+        ${input.record.acceptedAt},
+        ${input.record.acceptedAt},
+        ${null},
+        ${null}
+      )
+    `,
+  });
+
   const findContractHeader = SqlSchema.findOneOption({
     Request: ContractHashRequest,
     Result: ContractHeaderRow,
@@ -253,7 +298,9 @@ const makeFoundryApprovedContractStore = Effect.gen(function* () {
   )(function* (input) {
     if (
       !approvalStorageMatchesRecord(input.approvals[0], input.record.approvals[0]) ||
-      !approvalStorageMatchesRecord(input.approvals[1], input.record.approvals[1])
+      !approvalStorageMatchesRecord(input.approvals[1], input.record.approvals[1]) ||
+      input.dispatch.dispatchIdempotencyKey !== input.record.dispatchIdempotencyKey ||
+      input.dispatch.dispatchId !== `dispatch_${input.record.dispatchIdempotencyKey.slice(0, 24)}`
     ) {
       return yield* conflict(input.record.contractHash, "contract-identity");
     }
@@ -303,6 +350,15 @@ const makeFoundryApprovedContractStore = Effect.gen(function* () {
             }
           }
 
+          yield* insertDispatchJob(input).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "FoundryApprovedContractStore.storeVerified:insertDispatchJob",
+                "FoundryApprovedContractStore.storeVerified:encodeDispatchJob",
+              ),
+            ),
+          );
+
           const storedHeader = yield* findHeader(input.record.contractHash);
           if (Option.isNone(storedHeader)) {
             return yield* new PersistenceDecodeError({
@@ -332,21 +388,27 @@ const makeFoundryApprovedContractStore = Effect.gen(function* () {
       if (Option.isNone(header)) {
         return Option.none<FoundryApprovedContractPacket>();
       }
-      const packet = yield* Effect.try({
-        try: () => decodeFoundryApprovedContractPacket(JSON.parse(header.value.packetJson)),
-        catch: (cause) =>
-          new PersistenceDecodeError({
-            operation: "FoundryApprovedContractStore.readPacketByContractHash:decodePacket",
-            issue: Schema.isSchemaError(cause) ? "InvalidStoredPacket" : "InvalidStoredJson",
+      const packet = yield* decodeStoredApprovedContractPacket(header.value.packetJson).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError(
+            "FoundryApprovedContractStore.readPacketByContractHash:decodePacket",
             cause,
-          }),
-      });
+          ),
+        ),
+      );
       return Option.some(packet);
+    });
+
+  const readRecordByContractHash: FoundryApprovedContractStoreShape["readRecordByContractHash"] =
+    Effect.fn("FoundryApprovedContractStore.readRecordByContractHash")(function* (contractHash) {
+      const header = yield* findHeader(contractHash);
+      return Option.isNone(header) ? Option.none() : Option.some(yield* loadRecord(header.value));
     });
 
   return {
     storeVerified,
     readPacketByContractHash,
+    readRecordByContractHash,
   } satisfies FoundryApprovedContractStoreShape;
 });
 

@@ -1,11 +1,12 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type { FoundryApprovedContractPacket } from "@t3tools/contracts";
+import { FoundryApprovedContractPacket } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { FoundryApprovedContractStore } from "../Services/FoundryApprovedContractStore.ts";
@@ -39,6 +40,10 @@ const baseBody = {
   riskFlags: ["clipboard-data"],
 } as const;
 
+const decodePacketJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(FoundryApprovedContractPacket),
+);
+
 interface FixtureOptions {
   readonly contractHash?: string;
   readonly featureId?: string;
@@ -59,6 +64,7 @@ interface FixtureOptions {
 
 function makeStoreInput(options: FixtureOptions = {}) {
   const contractHash = options.contractHash ?? "3".repeat(64);
+  const dispatchIdempotencyKey = options.dispatchIdempotencyKey ?? contractHash;
   const founderOrder = options.founderOrder ?? ["founder-alice", "founder-bob"];
   const eventIds = options.eventIds ?? ["1".repeat(64), "2".repeat(64)];
   const encodedEvents = options.encodedEvents ?? ['{"event":1}', '{"event":2}'];
@@ -108,7 +114,7 @@ function makeStoreInput(options: FixtureOptions = {}) {
       founderRegistryHash: options.founderRegistryHash ?? "4".repeat(64),
       approvalSubject:
         options.approvalSubject ?? "foundry.contract.approve/v1\nhotpaste\nclipboard-history",
-      dispatchIdempotencyKey: options.dispatchIdempotencyKey ?? contractHash,
+      dispatchIdempotencyKey,
       acceptedAt: options.acceptedAt ?? "2026-08-11T12:00:00.000Z",
       approvals: approvals.map(
         ({ encodedEvent: _encodedEvent, ...evidence }) => evidence,
@@ -120,6 +126,14 @@ function makeStoreInput(options: FixtureOptions = {}) {
     canonicalBodyJson: JSON.stringify(body),
     packetJson: JSON.stringify(packet),
     packetDigest: options.packetDigest ?? "6".repeat(64),
+    dispatch: {
+      dispatchId: `dispatch_${dispatchIdempotencyKey.slice(0, 24)}`,
+      dispatchIdempotencyKey,
+      environmentId: body.execution.environmentId,
+      branch: `foundry/${body.featureId}-v${body.version}-${contractHash.slice(0, 12)}`,
+      baseSha: body.repository.baseSha,
+      maxAttempts: body.execution.limits.maximumRetries + 1,
+    },
     approvals,
   } as const;
 }
@@ -156,12 +170,14 @@ layer("FoundryApprovedContractStore", (it) => {
       const counts = yield* sql<{
         readonly contracts: number;
         readonly approvals: number;
+        readonly dispatches: number;
       }>`
         SELECT
           (SELECT COUNT(*) FROM foundry_approved_contracts) AS contracts,
-          (SELECT COUNT(*) FROM foundry_approval_events) AS approvals
+          (SELECT COUNT(*) FROM foundry_approval_events) AS approvals,
+          (SELECT COUNT(*) FROM foundry_dispatch_jobs) AS dispatches
       `;
-      assert.deepEqual(counts, [{ contracts: 1, approvals: 2 }]);
+      assert.deepEqual(counts, [{ contracts: 1, approvals: 2, dispatches: 1 }]);
     }),
   );
 
@@ -245,9 +261,58 @@ layer("FoundryApprovedContractStore", (it) => {
         FROM foundry_approval_events
         ORDER BY event_id
       `;
+        const dispatchRows = yield* sql<{ readonly dispatchId: string }>`
+        SELECT dispatch_id AS "dispatchId"
+        FROM foundry_dispatch_jobs
+        ORDER BY dispatch_id
+      `;
         assert.deepEqual(contractRows, [{ contractHash: "3".repeat(64) }]);
         assert.deepEqual(approvalRows, [{ eventId: "1".repeat(64) }, { eventId: "2".repeat(64) }]);
+        assert.deepEqual(dispatchRows, [{ dispatchId: `dispatch_${"3".repeat(24)}` }]);
       }),
+  );
+
+  it.effect("rolls back contract acceptance when the dispatch identity collides", () =>
+    Effect.gen(function* () {
+      const store = yield* FoundryApprovedContractStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.storeVerified(
+        makeStoreInput({
+          contractHash: "e".repeat(64),
+          featureId: "dispatch-collision-one",
+          eventIds: ["a".repeat(64), "b".repeat(64)],
+          encodedEvents: ['{"event":"a"}', '{"event":"b"}'],
+          packetDigest: "e".repeat(64),
+          dispatchIdempotencyKey: `a${"1".repeat(63)}`,
+        }),
+      );
+
+      const error = yield* Effect.flip(
+        store.storeVerified(
+          makeStoreInput({
+            contractHash: "f".repeat(64),
+            featureId: "dispatch-collision-two",
+            eventIds: ["c".repeat(64), "d".repeat(64)],
+            encodedEvents: ['{"event":"c"}', '{"event":"d"}'],
+            packetDigest: "f".repeat(64),
+            dispatchIdempotencyKey: `a${"1".repeat(23)}${"2".repeat(40)}`,
+          }),
+        ),
+      );
+      assert.equal(error._tag, "PersistenceSqlError");
+
+      const counts = yield* sql<{
+        readonly contracts: number;
+        readonly approvals: number;
+        readonly dispatches: number;
+      }>`
+        SELECT
+          (SELECT COUNT(*) FROM foundry_approved_contracts) AS contracts,
+          (SELECT COUNT(*) FROM foundry_approval_events) AS approvals,
+          (SELECT COUNT(*) FROM foundry_dispatch_jobs) AS dispatches
+      `;
+      assert.deepEqual(counts, [{ contracts: 2, approvals: 4, dispatches: 2 }]);
+    }),
   );
 
   it.effect("reads a strict packet without manufacturing a verified proposal", () =>
@@ -257,9 +322,14 @@ layer("FoundryApprovedContractStore", (it) => {
       yield* store.storeVerified(input);
 
       const packet = yield* store.readPacketByContractHash(input.record.contractHash);
+      const record = yield* store.readRecordByContractHash(input.record.contractHash);
       assert.isTrue(Option.isSome(packet));
+      assert.isTrue(Option.isSome(record));
       if (Option.isSome(packet)) {
-        assert.deepEqual(packet.value, JSON.parse(input.packetJson));
+        assert.deepEqual(packet.value, decodePacketJson(input.packetJson));
+      }
+      if (Option.isSome(record)) {
+        assert.deepEqual(record.value, input.record);
       }
       const missing = yield* store.readPacketByContractHash("f".repeat(64));
       assert.isTrue(Option.isNone(missing));
@@ -293,7 +363,7 @@ it.effect("decodes the strict packet after reopening the SQLite database", () =>
 
     assert.isTrue(Option.isSome(packet));
     if (Option.isSome(packet)) {
-      assert.deepEqual(packet.value, JSON.parse(input.packetJson));
+      assert.deepEqual(packet.value, decodePacketJson(input.packetJson));
     }
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

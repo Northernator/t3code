@@ -148,6 +148,7 @@ function testLayer(input: {
   const store = FoundryApprovedContractStore.of({
     storeVerified: input.storeVerified,
     readPacketByContractHash: () => Effect.succeed(Option.none()),
+    readRecordByContractHash: () => Effect.succeed(Option.none()),
   });
   return FoundryApprovedContractIngestionLive.pipe(
     Layer.provide(

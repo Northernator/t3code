@@ -10,6 +10,7 @@ import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { PersistenceDecodeError, PersistenceSqlError } from "../Errors.ts";
+import { FoundryDispatchCreationInput } from "./FoundryDispatchStore.ts";
 
 export const FoundryApprovalStorageInput = Schema.Struct({
   ...FoundryStoredApprovalEvidence.fields,
@@ -23,6 +24,7 @@ export const StoreVerifiedFoundryApprovedContractInput = Schema.Struct({
   packetJson: Schema.String,
   packetDigest: FoundryApprovedContractRecord.fields.contractHash,
   approvals: Schema.Tuple([FoundryApprovalStorageInput, FoundryApprovalStorageInput]),
+  dispatch: FoundryDispatchCreationInput,
 });
 export type StoreVerifiedFoundryApprovedContractInput =
   typeof StoreVerifiedFoundryApprovedContractInput.Type;
@@ -53,6 +55,13 @@ export interface FoundryApprovedContractStoreShape {
     contractHash: string,
   ) => Effect.Effect<
     Option.Option<FoundryApprovedContractPacket>,
+    PersistenceSqlError | PersistenceDecodeError
+  >;
+
+  readonly readRecordByContractHash: (
+    contractHash: string,
+  ) => Effect.Effect<
+    Option.Option<FoundryApprovedContractRecord>,
     PersistenceSqlError | PersistenceDecodeError
   >;
 }
