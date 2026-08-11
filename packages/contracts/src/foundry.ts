@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { IsoDateTime } from "./baseSchemas.ts";
+import { CheckpointRef, CommandId, IsoDateTime, ThreadId, TurnId } from "./baseSchemas.ts";
 
 const strictDecodeOptions = {
   errors: "all",
@@ -32,6 +32,33 @@ const FeatureId = Schema.String.check(
 const GitObjectId = Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i));
 const Hex64 = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 const Hex128 = Schema.String.check(Schema.isPattern(/^[0-9a-f]{128}$/));
+export const FoundryDispatchId = Schema.String.check(Schema.isPattern(/^dispatch_[0-9a-f]{24}$/));
+export type FoundryDispatchId = typeof FoundryDispatchId.Type;
+export const FoundryDispatchIdempotencyKey = Hex64;
+export type FoundryDispatchIdempotencyKey = typeof FoundryDispatchIdempotencyKey.Type;
+export const FoundryRunnerId = Identifier;
+export type FoundryRunnerId = typeof FoundryRunnerId.Type;
+export const FoundryDispatchFenceToken = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+);
+export type FoundryDispatchFenceToken = typeof FoundryDispatchFenceToken.Type;
+export const FoundryDispatchAttemptNumber = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+);
+export type FoundryDispatchAttemptNumber = typeof FoundryDispatchAttemptNumber.Type;
+export const FoundryDispatchEvidenceKey = Hex64;
+export type FoundryDispatchEvidenceKey = typeof FoundryDispatchEvidenceKey.Type;
+export const FoundryDispatchReportId = Hex64;
+export type FoundryDispatchReportId = typeof FoundryDispatchReportId.Type;
+const FoundryDispatchTimestamp = IsoDateTime.check(
+  Schema.makeFilter((value) => {
+    const epochMilliseconds = Date.parse(value);
+    return (
+      (Number.isFinite(epochMilliseconds) && new Date(epochMilliseconds).toISOString() === value) ||
+      "Foundry dispatch timestamps must be canonical UTC ISO timestamps."
+    );
+  }),
+);
 
 export const FOUNDRY_APPROVED_CONTRACT_PACKET_MAX_BYTES = 256 * 1_024;
 
@@ -216,6 +243,277 @@ export class FoundryApprovedContractIngestError extends Schema.TaggedErrorClass<
         return "The approved contract conflicts with an existing Foundry record.";
       case "unavailable":
         return "Foundry approval ingestion is temporarily unavailable.";
+    }
+  }
+}
+
+export const FoundryDispatchState = Schema.Literals(["queued", "running", "succeeded", "failed"]);
+export type FoundryDispatchState = typeof FoundryDispatchState.Type;
+
+export const FoundryDispatchAttemptState = Schema.Literals([
+  "running",
+  "abandoned",
+  "succeeded",
+  "failed",
+]);
+export type FoundryDispatchAttemptState = typeof FoundryDispatchAttemptState.Type;
+
+/** Coarse runner failures safe to expose to authenticated status clients. */
+export const FoundryDispatchFailureCode = Schema.Literals([
+  "approval-invalid",
+  "environment-mismatch",
+  "project-unavailable",
+  "provider-unavailable",
+  "model-unavailable",
+  "base-revision-unavailable",
+  "worktree-failed",
+  "thread-failed",
+  "turn-failed",
+  "lease-lost",
+  "internal",
+]);
+export type FoundryDispatchFailureCode = typeof FoundryDispatchFailureCode.Type;
+
+const FoundryWorktreePlannedReport = Schema.Struct({
+  kind: Schema.Literal("worktree-planned"),
+  evidenceKey: FoundryDispatchEvidenceKey,
+  branch: ShortText,
+});
+const FoundryWorktreeReadyReport = Schema.Struct({
+  kind: Schema.Literal("worktree-ready"),
+  evidenceKey: FoundryDispatchEvidenceKey,
+  branch: ShortText,
+});
+const FoundryTurnPlannedReport = Schema.Struct({
+  kind: Schema.Literal("turn-planned"),
+  evidenceKey: FoundryDispatchEvidenceKey,
+  threadId: ThreadId,
+  commandId: CommandId,
+  createdAt: FoundryDispatchTimestamp,
+});
+const FoundryTurnStartedReport = Schema.Struct({
+  kind: Schema.Literal("turn-started"),
+  evidenceKey: FoundryDispatchEvidenceKey,
+  threadId: ThreadId,
+  commandId: CommandId,
+  turnId: TurnId,
+});
+const FoundryDispatchCheckpoint = Schema.Struct({
+  status: Schema.Literal("ready"),
+  checkpointRef: CheckpointRef,
+});
+const FoundryDispatchFailureCorrelation = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  turnId: Schema.NullOr(TurnId),
+});
+const FoundryDispatchSucceededReport = Schema.Struct({
+  kind: Schema.Literal("succeeded"),
+  evidenceKey: FoundryDispatchEvidenceKey,
+  threadId: ThreadId,
+  commandId: CommandId,
+  turnId: TurnId,
+  checkpoint: FoundryDispatchCheckpoint,
+});
+const FoundryDispatchFailedReport = Schema.Struct({
+  kind: Schema.Literal("failed"),
+  failureCode: FoundryDispatchFailureCode,
+  correlation: Schema.NullOr(FoundryDispatchFailureCorrelation),
+});
+
+/**
+ * The runner reports only deterministic resource identifiers and coarse
+ * outcomes. Local paths, provider output, prompts, and raw diagnostics never
+ * cross this status boundary.
+ */
+export const FoundryDispatchReport = Schema.Union([
+  FoundryWorktreePlannedReport,
+  FoundryWorktreeReadyReport,
+  FoundryTurnPlannedReport,
+  FoundryTurnStartedReport,
+  FoundryDispatchSucceededReport,
+  FoundryDispatchFailedReport,
+]).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryDispatchReport = typeof FoundryDispatchReport.Type;
+
+export const FoundryDispatchAttemptRecord = Schema.Struct({
+  attemptNumber: FoundryDispatchAttemptNumber,
+  fenceToken: FoundryDispatchFenceToken,
+  state: FoundryDispatchAttemptState,
+  claimedAt: FoundryDispatchTimestamp,
+  lastHeartbeatAt: FoundryDispatchTimestamp,
+  leaseExpiresAt: FoundryDispatchTimestamp,
+  completedAt: Schema.NullOr(FoundryDispatchTimestamp),
+  failureCode: Schema.NullOr(FoundryDispatchFailureCode),
+})
+  .check(
+    Schema.makeFilter((attempt) => {
+      if (attempt.state === "running") {
+        return (
+          (attempt.completedAt === null && attempt.failureCode === null) ||
+          "A running Foundry attempt cannot have a completion or failure."
+        );
+      }
+      if (attempt.state === "failed") {
+        return (
+          (attempt.completedAt !== null && attempt.failureCode !== null) ||
+          "A failed Foundry attempt needs a completion and failure code."
+        );
+      }
+      return (
+        (attempt.completedAt !== null && attempt.failureCode === null) ||
+        "A completed Foundry attempt cannot carry a failure code."
+      );
+    }),
+  )
+  .annotate({ parseOptions: strictDecodeOptions });
+export type FoundryDispatchAttemptRecord = typeof FoundryDispatchAttemptRecord.Type;
+
+export const FoundryDispatchEvidenceRecord = Schema.Struct({
+  sequence: FoundryDispatchAttemptNumber,
+  attemptNumber: FoundryDispatchAttemptNumber,
+  fenceToken: FoundryDispatchFenceToken,
+  reportId: FoundryDispatchReportId,
+  recordedAt: FoundryDispatchTimestamp,
+  report: FoundryDispatchReport,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryDispatchEvidenceRecord = typeof FoundryDispatchEvidenceRecord.Type;
+
+export const FoundryDispatchStatus = Schema.Struct({
+  dispatchId: FoundryDispatchId,
+  dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
+  contractHash: Hex64,
+  environmentId: Identifier,
+  state: FoundryDispatchState,
+  fenceToken: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+  attemptCount: Schema.Int.check(
+    Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  ),
+  createdAt: FoundryDispatchTimestamp,
+  updatedAt: FoundryDispatchTimestamp,
+  completedAt: Schema.NullOr(FoundryDispatchTimestamp),
+  attempts: Schema.Array(FoundryDispatchAttemptRecord).check(Schema.isMaxLength(101)),
+  evidence: Schema.Array(FoundryDispatchEvidenceRecord).check(Schema.isMaxLength(1_024)),
+})
+  .check(
+    Schema.makeFilter((dispatch) => {
+      const terminal = dispatch.state === "succeeded" || dispatch.state === "failed";
+      return (
+        (terminal && dispatch.completedAt !== null) ||
+        (!terminal && dispatch.completedAt === null) ||
+        "Foundry dispatch completion must match its state."
+      );
+    }),
+  )
+  .annotate({ parseOptions: strictDecodeOptions });
+export type FoundryDispatchStatus = typeof FoundryDispatchStatus.Type;
+
+export const FoundryClaimDispatchInput = Schema.Struct({
+  environmentId: Identifier,
+  runnerId: FoundryRunnerId,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryClaimDispatchInput = typeof FoundryClaimDispatchInput.Type;
+
+export const FoundryDispatchClaim = Schema.Struct({
+  job: FoundryDispatchStatus,
+  record: FoundryApprovedContractRecord,
+  packet: FoundryApprovedContractPacket,
+  attempt: FoundryDispatchAttemptRecord,
+})
+  .check(
+    Schema.makeFilter((claim) => {
+      return (
+        (claim.job.state === "running" &&
+          claim.attempt.state === "running" &&
+          claim.record.dispatchIdempotencyKey === claim.job.dispatchIdempotencyKey &&
+          claim.record.contractHash === claim.job.contractHash &&
+          claim.packet.body.execution.environmentId === claim.job.environmentId &&
+          claim.attempt.attemptNumber === claim.job.attemptCount &&
+          claim.attempt.fenceToken === claim.job.fenceToken) ||
+        "The Foundry dispatch claim contains inconsistent job, contract, or attempt records."
+      );
+    }),
+  )
+  .annotate({ parseOptions: strictDecodeOptions });
+export type FoundryDispatchClaim = typeof FoundryDispatchClaim.Type;
+
+export const FoundryClaimDispatchResult = Schema.Struct({
+  claim: Schema.NullOr(FoundryDispatchClaim),
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryClaimDispatchResult = typeof FoundryClaimDispatchResult.Type;
+
+const FoundryDispatchLeaseInputFields = {
+  dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
+  runnerId: FoundryRunnerId,
+  fenceToken: FoundryDispatchFenceToken,
+} as const;
+
+export const FoundryHeartbeatDispatchInput = Schema.Struct({
+  ...FoundryDispatchLeaseInputFields,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryHeartbeatDispatchInput = typeof FoundryHeartbeatDispatchInput.Type;
+
+export const FoundryHeartbeatDispatchResult = Schema.Struct({
+  dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
+  fenceToken: FoundryDispatchFenceToken,
+  leaseExpiresAt: FoundryDispatchTimestamp,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryHeartbeatDispatchResult = typeof FoundryHeartbeatDispatchResult.Type;
+
+export const FoundryReportDispatchInput = Schema.Struct({
+  ...FoundryDispatchLeaseInputFields,
+  reportId: FoundryDispatchReportId,
+  report: FoundryDispatchReport,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryReportDispatchInput = typeof FoundryReportDispatchInput.Type;
+
+export const FoundryReportDispatchResult = Schema.Struct({
+  disposition: Schema.Literals(["recorded", "replayed"]),
+  job: FoundryDispatchStatus,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryReportDispatchResult = typeof FoundryReportDispatchResult.Type;
+
+export const FoundryGetDispatchInput = Schema.Struct({
+  dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryGetDispatchInput = typeof FoundryGetDispatchInput.Type;
+
+export const FoundryGetDispatchResult = Schema.Struct({
+  job: FoundryDispatchStatus,
+}).annotate({ parseOptions: strictDecodeOptions });
+export type FoundryGetDispatchResult = typeof FoundryGetDispatchResult.Type;
+
+export const FoundryDispatchRpcErrorCode = Schema.Literals([
+  "not-configured",
+  "not-found",
+  "lease-lost",
+  "invalid-transition",
+  "conflict",
+  "unavailable",
+]);
+export type FoundryDispatchRpcErrorCode = typeof FoundryDispatchRpcErrorCode.Type;
+
+export class FoundryDispatchRpcError extends Schema.TaggedErrorClass<FoundryDispatchRpcError>()(
+  "FoundryDispatchRpcError",
+  {
+    code: FoundryDispatchRpcErrorCode,
+  },
+  { parseOptions: strictDecodeOptions },
+) {
+  override get message(): string {
+    switch (this.code) {
+      case "not-configured":
+        return "Foundry dispatch is not configured.";
+      case "not-found":
+        return "The Foundry dispatch was not found.";
+      case "lease-lost":
+        return "The Foundry dispatch lease is no longer current.";
+      case "invalid-transition":
+        return "The Foundry dispatch cannot accept that state transition.";
+      case "conflict":
+        return "The Foundry dispatch report conflicts with an existing record.";
+      case "unavailable":
+        return "Foundry dispatch is temporarily unavailable.";
     }
   }
 }

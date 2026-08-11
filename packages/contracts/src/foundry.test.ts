@@ -8,12 +8,21 @@ import {
   FoundryApprovedContractPacket,
   FoundryApprovedContractRecord,
   FoundryBuzzRelayUrl,
+  FoundryClaimDispatchResult,
+  FoundryDispatchAttemptRecord,
+  FoundryDispatchReport,
+  FoundryDispatchRpcError,
+  FoundryDispatchStatus,
   FoundryFounderRegistry,
+  FoundryGetDispatchInput,
+  FoundryHeartbeatDispatchInput,
+  FoundryReportDispatchInput,
   decodeFoundryApprovedContractPacket,
   decodeFoundryBuzzApprovalContent,
   decodeFoundryBuzzNostrEvent,
   decodeFoundryFeatureContractBody,
 } from "./foundry.ts";
+import { WS_METHODS } from "./rpc.ts";
 
 const decodeApprovedContractPacketSchema = Schema.decodeUnknownSync(FoundryApprovedContractPacket);
 const decodeBuzzRelayUrl = Schema.decodeUnknownSync(FoundryBuzzRelayUrl);
@@ -25,6 +34,14 @@ const decodeApprovedContractIngestResult = Schema.decodeUnknownSync(
 const decodeApprovedContractIngestError = Schema.decodeUnknownSync(
   FoundryApprovedContractIngestError,
 );
+const decodeDispatchAttempt = Schema.decodeUnknownSync(FoundryDispatchAttemptRecord);
+const decodeDispatchReport = Schema.decodeUnknownSync(FoundryDispatchReport);
+const decodeDispatchStatus = Schema.decodeUnknownSync(FoundryDispatchStatus);
+const decodeClaimDispatchResult = Schema.decodeUnknownSync(FoundryClaimDispatchResult);
+const decodeHeartbeatDispatchInput = Schema.decodeUnknownSync(FoundryHeartbeatDispatchInput);
+const decodeReportDispatchInput = Schema.decodeUnknownSync(FoundryReportDispatchInput);
+const decodeGetDispatchInput = Schema.decodeUnknownSync(FoundryGetDispatchInput);
+const decodeDispatchRpcError = Schema.decodeUnknownSync(FoundryDispatchRpcError);
 
 const body = {
   schemaVersion: 1,
@@ -66,6 +83,57 @@ const packet = {
     { founderId: "founder-bob", proof: { ...proof, encodedEvent: '{"signed":true}' } },
   ],
 } as const satisfies FoundryApprovedContractPacket;
+
+const storedRecord = {
+  contractHash: "3".repeat(64),
+  projectId: "hotpaste",
+  featureId: "clipboard-history",
+  version: 1,
+  founderRegistryHash: "4".repeat(64),
+  approvalSubject: "foundry.contract.approve/v1\nhotpaste\nclipboard-history",
+  dispatchIdempotencyKey: "5".repeat(64),
+  acceptedAt: "2026-08-11T12:00:00.000Z",
+  approvals: [
+    {
+      founderId: "founder-alice",
+      format: "buzz-nostr-event/v1",
+      eventId: "1".repeat(64),
+      createdAtEpochSeconds: 1_786_377_600,
+    },
+    {
+      founderId: "founder-bob",
+      format: "buzz-nostr-event/v1",
+      eventId: "2".repeat(64),
+      createdAtEpochSeconds: 1_786_377_601,
+    },
+  ],
+} as const;
+
+const runningAttempt = {
+  attemptNumber: 1,
+  fenceToken: 1,
+  state: "running",
+  claimedAt: "2026-08-11T12:01:00.000Z",
+  lastHeartbeatAt: "2026-08-11T12:01:00.000Z",
+  leaseExpiresAt: "2026-08-11T12:02:00.000Z",
+  completedAt: null,
+  failureCode: null,
+} as const;
+
+const runningJob = {
+  dispatchId: `dispatch_${"5".repeat(24)}`,
+  dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey,
+  contractHash: storedRecord.contractHash,
+  environmentId: body.execution.environmentId,
+  state: "running",
+  fenceToken: 1,
+  attemptCount: 1,
+  createdAt: "2026-08-11T12:00:00.000Z",
+  updatedAt: "2026-08-11T12:01:00.000Z",
+  completedAt: null,
+  attempts: [runningAttempt],
+  evidence: [],
+} as const;
 
 describe("Foundry wire contracts", () => {
   it("strictly decodes an approved contract packet without rewriting signed event bytes", () => {
@@ -213,34 +281,9 @@ describe("Foundry wire contracts", () => {
   });
 
   it("decodes stored approval records, ingest results, and coarse errors", () => {
-    const approvals = [
-      {
-        founderId: "founder-alice",
-        format: "buzz-nostr-event/v1",
-        eventId: "1".repeat(64),
-        createdAtEpochSeconds: 1_786_377_600,
-      },
-      {
-        founderId: "founder-bob",
-        format: "buzz-nostr-event/v1",
-        eventId: "2".repeat(64),
-        createdAtEpochSeconds: 1_786_377_601,
-      },
-    ] as const;
-    const record = {
-      contractHash: "3".repeat(64),
-      projectId: "hotpaste",
-      featureId: "clipboard-history",
-      version: 1,
-      founderRegistryHash: "4".repeat(64),
-      approvalSubject: "foundry.contract.approve/v1\nhotpaste\nclipboard-history",
-      dispatchIdempotencyKey: "5".repeat(64),
-      acceptedAt: "2026-08-11T12:00:00.000Z",
-      approvals,
-    } as const;
-    const result = { disposition: "stored", record } as const;
+    const result = { disposition: "stored", record: storedRecord } as const;
 
-    expect(decodeApprovedContractRecord(record)).toEqual(record);
+    expect(decodeApprovedContractRecord(storedRecord)).toEqual(storedRecord);
     expect(decodeApprovedContractIngestResult(result)).toEqual(result);
 
     const error = decodeApprovedContractIngestError({
@@ -274,5 +317,137 @@ describe("Foundry wire contracts", () => {
 
     expect(decodeFoundryBuzzNostrEvent(event)).toEqual(event);
     expect(() => decodeFoundryBuzzNostrEvent({ ...event, verified: true })).toThrow();
+  });
+
+  it("decodes a raw-packet dispatch claim and rejects inconsistent claim records", () => {
+    const result = {
+      claim: {
+        job: runningJob,
+        record: storedRecord,
+        packet,
+        attempt: runningAttempt,
+      },
+    } as const;
+
+    expect(decodeClaimDispatchResult(result)).toEqual(result);
+    expect(decodeClaimDispatchResult({ claim: null })).toEqual({ claim: null });
+    expect(() =>
+      decodeClaimDispatchResult({
+        claim: {
+          ...result.claim,
+          job: { ...runningJob, fenceToken: 2 },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeClaimDispatchResult({
+        claim: { ...result.claim, leaseToken: "secret" },
+      }),
+    ).toThrow();
+  });
+
+  it("strictly fences heartbeat and report inputs by dispatch, runner, and token", () => {
+    const lease = {
+      dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey,
+      runnerId: "foundry-runner-a",
+      fenceToken: 1,
+    } as const;
+    const report = {
+      ...lease,
+      reportId: "6".repeat(64),
+      report: {
+        kind: "turn-planned",
+        evidenceKey: "7".repeat(64),
+        threadId: "foundry-thread-1",
+        commandId: "foundry-command-1",
+        createdAt: "2026-08-11T12:01:00.000Z",
+      },
+    } as const;
+
+    expect(decodeHeartbeatDispatchInput(lease)).toEqual(lease);
+    expect(decodeReportDispatchInput(report)).toEqual(report);
+    expect(
+      decodeGetDispatchInput({ dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey }),
+    ).toEqual({ dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey });
+    expect(() => decodeHeartbeatDispatchInput({ ...lease, fenceToken: 0 })).toThrow();
+    expect(() => decodeHeartbeatDispatchInput({ ...lease, leaseToken: "secret" })).toThrow();
+    expect(() =>
+      decodeReportDispatchInput({
+        ...report,
+        report: { ...report.report, createdAt: "2026-08-11 12:01:00" },
+      }),
+    ).toThrow();
+  });
+
+  it("records bounded execution correlations without paths or raw diagnostics", () => {
+    const succeeded = {
+      kind: "succeeded",
+      evidenceKey: "8".repeat(64),
+      threadId: "foundry-thread-1",
+      commandId: "foundry-command-1",
+      turnId: "turn-1",
+      checkpoint: {
+        status: "ready",
+        checkpointRef: "refs/t3/checkpoints/foundry-thread-1/turn/1",
+      },
+    } as const;
+    const failed = {
+      kind: "failed",
+      failureCode: "turn-failed",
+      correlation: {
+        threadId: "foundry-thread-1",
+        commandId: "foundry-command-1",
+        turnId: "turn-1",
+      },
+    } as const;
+
+    expect(decodeDispatchReport(succeeded)).toEqual(succeeded);
+    expect(decodeDispatchReport(failed)).toEqual(failed);
+    expect(() => decodeDispatchReport({ ...succeeded, worktreePath: "C:\\secret" })).toThrow();
+    expect(() => decodeDispatchReport({ ...failed, diagnostics: "provider stderr" })).toThrow();
+    expect(() =>
+      decodeDispatchReport({
+        ...succeeded,
+        checkpoint: { status: "missing" },
+      }),
+    ).toThrow();
+  });
+
+  it("enforces coherent job and attempt terminal states", () => {
+    expect(decodeDispatchAttempt(runningAttempt)).toEqual(runningAttempt);
+    expect(decodeDispatchStatus(runningJob)).toEqual(runningJob);
+    expect(() =>
+      decodeDispatchAttempt({
+        ...runningAttempt,
+        state: "failed",
+        completedAt: "2026-08-11T12:03:00.000Z",
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeDispatchStatus({
+        ...runningJob,
+        state: "succeeded",
+      }),
+    ).toThrow();
+  });
+
+  it("publishes the four Foundry dispatch RPC method names and coarse RPC errors", () => {
+    expect(WS_METHODS.foundryClaimDispatch).toBe("foundry.claimDispatch");
+    expect(WS_METHODS.foundryHeartbeatDispatch).toBe("foundry.heartbeatDispatch");
+    expect(WS_METHODS.foundryReportDispatch).toBe("foundry.reportDispatch");
+    expect(WS_METHODS.foundryGetDispatch).toBe("foundry.getDispatch");
+
+    const error = decodeDispatchRpcError({
+      _tag: "FoundryDispatchRpcError",
+      code: "lease-lost",
+    });
+    expect(error.message).toBe("The Foundry dispatch lease is no longer current.");
+    expect(() =>
+      decodeDispatchRpcError({
+        _tag: "FoundryDispatchRpcError",
+        code: "lease-lost",
+        diagnostics: "runner id and local path",
+      }),
+    ).toThrow();
   });
 });

@@ -23,6 +23,15 @@ import {
   FoundryApprovedContractIngestError,
   FoundryApprovedContractIngestResult,
   FoundryApprovedContractPacket,
+  FoundryClaimDispatchInput,
+  FoundryClaimDispatchResult,
+  FoundryDispatchRpcError,
+  FoundryGetDispatchInput,
+  FoundryGetDispatchResult,
+  FoundryHeartbeatDispatchInput,
+  FoundryHeartbeatDispatchResult,
+  FoundryReportDispatchInput,
+  FoundryReportDispatchResult,
 } from "./foundry.ts";
 import {
   GitActionProgressEvent,
@@ -212,6 +221,10 @@ export const WS_METHODS = {
 
   // Foundry methods
   foundryIngestApprovedContract: "foundry.ingestApprovedContract",
+  foundryClaimDispatch: "foundry.claimDispatch",
+  foundryHeartbeatDispatch: "foundry.heartbeatDispatch",
+  foundryReportDispatch: "foundry.reportDispatch",
+  foundryGetDispatch: "foundry.getDispatch",
 
   // VCS methods
   vcsPull: "vcs.pull",
@@ -321,6 +334,30 @@ export const WsFoundryIngestApprovedContractRpc = Rpc.make(
     error: Schema.Union([FoundryApprovedContractIngestError, EnvironmentAuthorizationError]),
   },
 );
+
+export const WsFoundryClaimDispatchRpc = Rpc.make(WS_METHODS.foundryClaimDispatch, {
+  payload: FoundryClaimDispatchInput,
+  success: FoundryClaimDispatchResult,
+  error: Schema.Union([FoundryDispatchRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsFoundryHeartbeatDispatchRpc = Rpc.make(WS_METHODS.foundryHeartbeatDispatch, {
+  payload: FoundryHeartbeatDispatchInput,
+  success: FoundryHeartbeatDispatchResult,
+  error: Schema.Union([FoundryDispatchRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsFoundryReportDispatchRpc = Rpc.make(WS_METHODS.foundryReportDispatch, {
+  payload: FoundryReportDispatchInput,
+  success: FoundryReportDispatchResult,
+  error: Schema.Union([FoundryDispatchRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsFoundryGetDispatchRpc = Rpc.make(WS_METHODS.foundryGetDispatch, {
+  payload: FoundryGetDispatchInput,
+  success: FoundryGetDispatchResult,
+  error: Schema.Union([FoundryDispatchRpcError, EnvironmentAuthorizationError]),
+});
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -965,6 +1002,10 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 
 export const WsRpcGroup = RpcGroup.make(
   WsFoundryIngestApprovedContractRpc,
+  WsFoundryClaimDispatchRpc,
+  WsFoundryHeartbeatDispatchRpc,
+  WsFoundryReportDispatchRpc,
+  WsFoundryGetDispatchRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
