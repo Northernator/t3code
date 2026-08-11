@@ -165,9 +165,12 @@ describe("compileApprovedTurn", () => {
     expect(replay.input.message).toEqual(first.input.message);
     expect(first.threadAction).toBe("create");
     expect(replay.threadAction).toBe("adopt");
+    expect(first.expectedThread.title).toBe(body.title);
+    expect(replay.expectedThread.title).toBe(body.title);
     expect(replay.input.bootstrap).toBeUndefined();
     expect(first.environmentId).toBe(binding.environmentId);
     expect(first.input.runtimeMode).toBe("approval-required");
+    expect(first.input.titleSeed).toBeUndefined();
     expect(first.input.bootstrap?.createThread?.runtimeMode).toBe("approval-required");
     expect(first.input.bootstrap?.createThread?.branch).toBe(run.dispatch.branch);
     expect(first.input.bootstrap?.createThread?.worktreePath).toBe(
@@ -234,6 +237,49 @@ describe("compileApprovedTurn", () => {
       input: null,
       worktree: existingWorktree,
     });
+  });
+
+  it("reattaches an existing dispatch branch that has no worktree", () => {
+    const run = approvedRun();
+    const replay = compileApprovedWorktree({
+      ...run,
+      binding,
+      existingRef: {
+        name: run.dispatch.branch,
+        current: false,
+        isDefault: false,
+        worktreePath: null,
+      },
+    });
+
+    expect(replay).toEqual({
+      environmentId: binding.environmentId,
+      action: "create",
+      input: {
+        cwd: binding.projectCwd,
+        refName: run.dispatch.branch,
+        path: null,
+      },
+      worktree: null,
+    });
+  });
+
+  it("rejects an attached branch unless the caller supplies the observed worktree", () => {
+    const run = approvedRun();
+    expectCompileError(
+      () =>
+        compileApprovedWorktree({
+          ...run,
+          binding,
+          existingRef: {
+            name: run.dispatch.branch,
+            current: false,
+            isDefault: false,
+            worktreePath: "C:\\dev\\hotpaste-worktrees\\clipboard-history",
+          },
+        }),
+      "worktree-mismatch",
+    );
   });
 
   it("rejects a proposal whose local verification mark was lost", () => {

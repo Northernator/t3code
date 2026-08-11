@@ -8,6 +8,7 @@ import {
   ThreadId,
   type VcsCreateWorktreeInput,
   type VcsCreateWorktreeResult,
+  type VcsRef,
 } from "@t3tools/contracts";
 import {
   isVerifiedFeatureProposal,
@@ -31,6 +32,7 @@ export interface LocalRunnerBinding {
 export interface CompiledT3Turn {
   readonly environmentId: string;
   readonly threadAction: "create" | "adopt";
+  readonly expectedThread: ExistingT3Thread;
   readonly input: StartThreadTurnInput;
 }
 
@@ -187,6 +189,7 @@ export function compileApprovedWorktree(input: {
   readonly proposal: VerifiedFeatureProposal;
   readonly dispatch: FoundryDispatch;
   readonly binding: LocalRunnerBinding;
+  readonly existingRef?: VcsRef | null;
   readonly existingWorktree?: VcsCreateWorktreeResult | null;
 }): CompiledT3Worktree {
   const dispatch = validateApprovedRun(input);
@@ -202,6 +205,22 @@ export function compileApprovedWorktree(input: {
       action: "adopt",
       input: null,
       worktree: input.existingWorktree,
+    };
+  }
+
+  if (input.existingRef) {
+    if (input.existingRef.name !== dispatch.branch || input.existingRef.worktreePath !== null) {
+      fail("worktree-mismatch", "The existing ref does not match an unattached dispatch branch.");
+    }
+    return {
+      environmentId: input.binding.environmentId,
+      action: "create",
+      input: {
+        cwd: input.binding.projectCwd,
+        refName: dispatch.branch,
+        path: null,
+      },
+      worktree: null,
     };
   }
 
@@ -273,6 +292,10 @@ export function compileApprovedTurn(input: {
   return {
     environmentId: input.binding.environmentId,
     threadAction: input.existingThread ? "adopt" : "create",
+    expectedThread: {
+      id: threadId,
+      ...createThread,
+    },
     input: {
       commandId: CommandId.make(`foundry-command-${idSuffix}`),
       threadId,
@@ -283,7 +306,6 @@ export function compileApprovedTurn(input: {
         attachments: [],
       },
       modelSelection,
-      titleSeed: input.proposal.body.title,
       runtimeMode: "approval-required",
       interactionMode: "default",
       ...(input.existingThread ? {} : { bootstrap: { createThread, runSetupScript: false } }),
