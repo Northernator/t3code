@@ -76,8 +76,8 @@ The first identity adapter is pinned to [Block Buzz](https://github.com/block/bu
 - Standard NIP-01 event ID serialization and BIP-340 Schnorr signatures.
 - NIP-29 stream message kind `9`, including a non-empty `h` channel tag.
 - A `t=foundry.contract.approval/v1` tag for efficient filtering.
-- Strict JSON content containing `type=foundry.contract.approval/v1` and the exact domain-separated
-  approval subject.
+- Strict JSON content containing `type=foundry.contract.approval/v1`, the exact domain-separated
+  approval subject, and the canonical Buzz relay URL that names the community authority.
 
 Using an ordinary signed stream message avoids allocating a private Buzz event kind before the Buzz
 project has standardized one. The configured founder public-key registry remains the identity
@@ -85,6 +85,31 @@ authority; a key or founder ID carried by an untrusted packet cannot modify that
 Nostr `created_at` value is retained as evidence, not treated as an expiry or authorization decision.
 See Buzz's [Nostr interoperability guide](https://github.com/block/buzz/blob/main/NOSTR.md) and
 [protocol architecture](https://github.com/block/buzz/blob/main/ARCHITECTURE.md).
+
+## Authenticated persistence slice
+
+The T3 server exposes `foundry.ingestApprovedContract` over the existing authenticated WebSocket RPC
+transport. The method requires `orchestration:operate`; founder signatures do not replace the local
+T3 session authorization check. The RPC schema rejects excess fields and packets larger than 256
+KiB before the handler runs.
+
+Every call performs the complete cryptographic verification path before reading or writing Foundry
+storage, including a replay of a previously accepted packet. The two public keys, canonical Buzz
+relay URL, exact Buzz `h` group, and target T3 environment come only from startup-local configuration.
+A packet cannot select or amend any of them. Requiring the relay URL in the founder-signed content
+prevents a same-named NIP-29 group on another relay community from becoming an approval source.
+
+Migration 041 stores an immutable contract header and its two exact signed events in one SQLite
+transaction. The full contract hash is the content identity, while the unique
+`(project_id, feature_id, contract_version)` tuple prevents two different bodies from claiming the
+same logical revision. Re-signed or reordered proofs for the same verified contract are a semantic
+replay and return the original server acceptance time and evidence. Reusing an approval event for a
+different contract, or presenting a different contract for an occupied logical revision, is a
+conflict and rolls the entire write back.
+
+The stored packet is an audit/replay input, not verification authority. Any later dispatcher must
+read the packet and run governance verification again; it must never recreate the in-memory verified
+brand from a database row.
 
 ## Safety defaults
 
@@ -102,18 +127,17 @@ The next slices should preserve these interfaces:
 
 - `BuzzIdentityAdapter`: verifies founder identity and signed approval events. The Nostr v1 adapter
   now establishes this interface; relay transport and key provisioning remain future work.
-- `FoundryStore`: appends governance events and rebuilds projections.
+- `FoundryApprovedContractStore`: atomically records verified packets and immutable approval evidence.
 - `T3Driver`: creates or resumes one project worktree, thread, and turn.
 - `FoundryRunner`: claims approved dispatches and returns hash-bound evidence.
 - `ForgeAdapter`: observes pull-request checks, reviews, and the final merge commit.
 
 ## Current limitations
 
-This is still a policy, wire-ingestion, and T3 input-compiler layer rather than a network service. It
-does not yet connect to a Buzz relay, provision founder keys, persist accepted packets, or expose a
-Foundry RPC. The next server slice should store only strictly decoded and cryptographically verified
-packets, enforce replay uniqueness transactionally, and make the resulting projection available to a
-server-backed Council UI.
+This now includes authenticated wire ingestion and immutable local persistence, but it does not yet
+connect to a Buzz relay, provision founder keys, dispatch stored contracts automatically, or expose a
+server-backed Council UI. The next slice should add a local runner claim/re-verification boundary and
+make the accepted-contract projection observable without treating that projection as authority.
 
 The local runner binding is trusted configuration for now. The executable runner must build it from
 T3's current provider inventory and verify that the approved provider driver and model still exist

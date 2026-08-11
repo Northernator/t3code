@@ -40,4 +40,5 @@ policy in [CONTRIBUTING.md](../CONTRIBUTING.md); agent rules in [AGENTS.md](../A
 - [Release](./operations/release.md)
 - [Observability](./operations/observability.md)
 - [Relay observability](./operations/relay-observability.md)
+- [Foundry approval ingestion](./operations/foundry-ingestion.md)
 - [Mobile app store screenshots](./operations/mobile-app-store-screenshots.md)

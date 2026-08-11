@@ -498,6 +498,9 @@ importers:
       '@t3tools/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@t3tools/foundry-governance':
+        specifier: workspace:*
+        version: link:../../packages/foundry-governance
       '@t3tools/shared':
         specifier: workspace:*
         version: link:../../packages/shared

@@ -37,6 +37,12 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
   });
 
+  it("requires environment operation access to ingest an approved Foundry contract", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.foundryIngestApprovedContract)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("reads the reviewer menu under the same scope as the pull request it belongs to", () => {
     // The candidate list is a read like the detail beside it, and asking somebody for a review is
     // a write like every other pull request operation.

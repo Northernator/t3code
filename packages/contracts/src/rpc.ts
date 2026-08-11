@@ -20,6 +20,11 @@ import {
 } from "./filesystem.ts";
 import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
 import {
+  FoundryApprovedContractIngestError,
+  FoundryApprovedContractIngestResult,
+  FoundryApprovedContractPacket,
+} from "./foundry.ts";
+import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
   VcsSwitchRefResult,
@@ -205,6 +210,9 @@ export const WS_METHODS = {
   filesystemBrowse: "filesystem.browse",
   assetsCreateUrl: "assets.createUrl",
 
+  // Foundry methods
+  foundryIngestApprovedContract: "foundry.ingestApprovedContract",
+
   // VCS methods
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
@@ -304,6 +312,15 @@ export const WS_METHODS = {
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
 } as const;
+
+export const WsFoundryIngestApprovedContractRpc = Rpc.make(
+  WS_METHODS.foundryIngestApprovedContract,
+  {
+    payload: FoundryApprovedContractPacket,
+    success: FoundryApprovedContractIngestResult,
+    error: Schema.Union([FoundryApprovedContractIngestError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -947,6 +964,7 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  WsFoundryIngestApprovedContractRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

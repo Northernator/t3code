@@ -12,6 +12,8 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   EventId,
+  FoundryApprovedContractIngestError,
+  type FoundryApprovedContractPacket,
   GitCommandError,
   KeybindingRule,
   MessageId,
@@ -101,6 +103,7 @@ const collectQueueUntil = Effect.fn("TransferBudget.collectQueueUntil")(function
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
+import * as FoundryApprovedContractIngestion from "./foundry/FoundryApprovedContractIngestion.ts";
 import { makeRoutesLayer } from "./server.ts";
 import { isThreadDetailEvent, resolveAvailableEditorsForConfig } from "./ws.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -280,6 +283,53 @@ const makeAuthTestLayer = () =>
     Layer.provide(SqlitePersistenceMemory),
     Layer.provide(ServerSecretStore.layer),
   );
+
+const foundryApprovedContractIngestionTestLayer = Layer.succeed(
+  FoundryApprovedContractIngestion.FoundryApprovedContractIngestion,
+  FoundryApprovedContractIngestion.FoundryApprovedContractIngestion.of({
+    ingest: () => Effect.fail(new FoundryApprovedContractIngestError({ code: "not-configured" })),
+  }),
+);
+
+const structurallyValidFoundryPacket = {
+  protocolVersion: 1,
+  body: {
+    schemaVersion: 1,
+    projectId: "hotpaste",
+    featureId: "clipboard-history",
+    version: 1,
+    title: "Clipboard history",
+    objective: "Let the user reopen a recently copied item.",
+    inScope: ["Store recent text items"],
+    outOfScope: ["Cloud synchronization"],
+    constraints: ["Keep execution approval-required"],
+    acceptanceCriteria: ["A copied item can be selected again"],
+    verificationCommands: ["vp test run clipboard-history.test.ts"],
+    repository: {
+      remoteId: "midlow/hotpaste",
+      baseBranch: "main",
+      baseSha: "0123456789abcdef0123456789abcdef01234567",
+    },
+    execution: {
+      environmentId: "founder-alice-laptop",
+      provider: "codex",
+      model: "gpt-5.6-sol-ultra",
+      runtimeMode: "approval-required",
+      limits: { maximumTurns: 20, maximumRetries: 2 },
+    },
+    riskFlags: ["clipboard-data"],
+  },
+  approvals: [
+    {
+      founderId: "founder-alice",
+      proof: { format: "buzz-nostr-event/v1", encodedEvent: "{}" },
+    },
+    {
+      founderId: "founder-bob",
+      proof: { format: "buzz-nostr-event/v1", encodedEvent: "{}" },
+    },
+  ],
+} as const satisfies FoundryApprovedContractPacket;
 
 const makeBrowserOtlpPayload = (spanName: string) =>
   Effect.gen(function* () {
@@ -825,6 +875,7 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
+      Layer.provide(foundryApprovedContractIngestionTestLayer),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(
@@ -3390,12 +3441,23 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(pairingResponse.status, 200);
       assert.equal(wsTicketResponse.status, 200);
       const wsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(wsTicketBody.ticket)}`;
-      const rpcError = yield* Effect.flip(
-        Effect.scoped(withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({}))),
+      const [rpcError, foundryRpcError] = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all([
+            Effect.flip(client[WS_METHODS.serverGetConfig]({})),
+            Effect.flip(
+              client[WS_METHODS.foundryIngestApprovedContract](structurallyValidFoundryPacket),
+            ),
+          ]),
+        ),
       );
       assert.equal(rpcError._tag, "EnvironmentAuthorizationError");
       if (rpcError._tag === "EnvironmentAuthorizationError") {
         assert.equal(rpcError.requiredScope, "orchestration:read");
+      }
+      assert.equal(foundryRpcError._tag, "EnvironmentAuthorizationError");
+      if (foundryRpcError._tag === "EnvironmentAuthorizationError") {
+        assert.equal(foundryRpcError.requiredScope, "orchestration:operate");
       }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

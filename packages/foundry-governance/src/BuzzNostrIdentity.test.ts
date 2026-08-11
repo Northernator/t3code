@@ -3,11 +3,11 @@ import type { FoundryApprovedContractPacket, FoundryBuzzNostrEvent } from "@t3to
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  BuzzNostrIdentityAdapter,
   computeBuzzNostrEventId,
   FOUNDRY_BUZZ_APPROVAL_EVENT_KIND,
   FOUNDRY_BUZZ_APPROVAL_TAG,
   FOUNDRY_BUZZ_NOSTR_EVENT_FORMAT,
+  makeBuzzNostrIdentityAdapter,
 } from "./BuzzNostrIdentity.ts";
 import {
   type FeatureContractBody,
@@ -24,6 +24,8 @@ import {
 
 const ALICE_PRIVATE_KEY = `${"00".repeat(31)}01`;
 const BOB_PRIVATE_KEY = `${"00".repeat(31)}02`;
+const BUZZ_GROUP_ID = "foundry-hotpaste";
+const BUZZ_RELAY_URL = "wss://buzz.example/";
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -33,6 +35,10 @@ const founders = [
   { id: "founder-alice", publicKey: toHex(schnorr.getPublicKey(ALICE_PRIVATE_KEY)) },
   { id: "founder-bob", publicKey: toHex(schnorr.getPublicKey(BOB_PRIVATE_KEY)) },
 ] as const satisfies ReadonlyArray<FounderIdentity>;
+const buzzIdentityAdapter = makeBuzzNostrIdentityAdapter({
+  groupId: BUZZ_GROUP_ID,
+  relayUrl: BUZZ_RELAY_URL,
+});
 
 const body: FeatureContractBody = {
   schemaVersion: 1,
@@ -65,18 +71,21 @@ function signedApprovalEvent(input: {
   readonly privateKey: string;
   readonly subject: string;
   readonly createdAt: number;
+  readonly groupId?: string;
+  readonly relayUrl?: string;
 }): FoundryBuzzNostrEvent {
   const eventBody = {
     pubkey: toHex(schnorr.getPublicKey(input.privateKey)),
     created_at: input.createdAt,
     kind: FOUNDRY_BUZZ_APPROVAL_EVENT_KIND,
     tags: [
-      ["h", "foundry-hotpaste"],
+      ["h", input.groupId ?? BUZZ_GROUP_ID],
       ["t", FOUNDRY_BUZZ_APPROVAL_TAG],
     ],
     content: JSON.stringify({
       type: "foundry.contract.approval/v1",
       subject: input.subject,
+      relayUrl: input.relayUrl ?? BUZZ_RELAY_URL,
     }),
   } as const;
   const id = computeBuzzNostrEventId(eventBody);
@@ -90,17 +99,23 @@ function signedApprovalEvent(input: {
 function packetFor(input?: {
   readonly aliceSubject?: string;
   readonly bobSubject?: string;
+  readonly groupId?: string;
+  readonly relayUrl?: string;
 }): FoundryApprovedContractPacket {
   const proposal = proposeFeatureContract({ body, founders });
   const aliceEvent = signedApprovalEvent({
     privateKey: ALICE_PRIVATE_KEY,
     subject: input?.aliceSubject ?? proposal.approvalSubject,
     createdAt: 1_786_377_600,
+    ...(input?.groupId !== undefined ? { groupId: input.groupId } : {}),
+    ...(input?.relayUrl !== undefined ? { relayUrl: input.relayUrl } : {}),
   });
   const bobEvent = signedApprovalEvent({
     privateKey: BOB_PRIVATE_KEY,
     subject: input?.bobSubject ?? proposal.approvalSubject,
     createdAt: 1_786_377_601,
+    ...(input?.groupId !== undefined ? { groupId: input.groupId } : {}),
+    ...(input?.relayUrl !== undefined ? { relayUrl: input.relayUrl } : {}),
   });
   return {
     protocolVersion: 1,
@@ -166,12 +181,12 @@ describe("Buzz Nostr approval ingestion", () => {
     const first = ingestApprovedContractPacket({
       packet,
       founders,
-      identityAdapters: [BuzzNostrIdentityAdapter],
+      identityAdapters: [buzzIdentityAdapter],
     });
     const replay = ingestApprovedContractPacket({
       packet: JSON.parse(JSON.stringify(packet)),
       founders,
-      identityAdapters: [BuzzNostrIdentityAdapter],
+      identityAdapters: [buzzIdentityAdapter],
     });
 
     expect(first.proposal.state).toBe("approved");
@@ -218,7 +233,7 @@ describe("Buzz Nostr approval ingestion", () => {
         ingestApprovedContractPacket({
           packet: wrongSigner,
           founders,
-          identityAdapters: [BuzzNostrIdentityAdapter],
+          identityAdapters: [buzzIdentityAdapter],
         }),
       "approval-proof-rejected",
       "signer-mismatch",
@@ -231,7 +246,33 @@ describe("Buzz Nostr approval ingestion", () => {
         ingestApprovedContractPacket({
           packet: packetFor({ aliceSubject: "foundry.contract.approve/v1\nother" }),
           founders,
-          identityAdapters: [BuzzNostrIdentityAdapter],
+          identityAdapters: [buzzIdentityAdapter],
+        }),
+      "approval-proof-rejected",
+      "subject-mismatch",
+    );
+  });
+
+  it("rejects correctly signed approvals from another Buzz group", () => {
+    expectIngestionError(
+      () =>
+        ingestApprovedContractPacket({
+          packet: packetFor({ groupId: "foundry-other-project" }),
+          founders,
+          identityAdapters: [buzzIdentityAdapter],
+        }),
+      "approval-proof-rejected",
+      "malformed-event",
+    );
+  });
+
+  it("rejects correctly signed approvals from another Buzz relay with the same group ID", () => {
+    expectIngestionError(
+      () =>
+        ingestApprovedContractPacket({
+          packet: packetFor({ relayUrl: "wss://another-buzz.example/" }),
+          founders,
+          identityAdapters: [buzzIdentityAdapter],
         }),
       "approval-proof-rejected",
       "subject-mismatch",
@@ -271,7 +312,7 @@ describe("Buzz Nostr approval ingestion", () => {
           ingestApprovedContractPacket({
             packet: testCase.packet,
             founders,
-            identityAdapters: [BuzzNostrIdentityAdapter],
+            identityAdapters: [buzzIdentityAdapter],
           }),
         "approval-proof-rejected",
         testCase.reason,
@@ -295,7 +336,7 @@ describe("Buzz Nostr approval ingestion", () => {
             ],
           },
           founders,
-          identityAdapters: [BuzzNostrIdentityAdapter],
+          identityAdapters: [buzzIdentityAdapter],
         }),
       "unsupported-proof-format",
     );
@@ -310,10 +351,10 @@ describe("Buzz Nostr approval ingestion", () => {
           founders,
           identityAdapters: [
             {
-              ...BuzzNostrIdentityAdapter,
+              ...buzzIdentityAdapter,
               verify: (input) => {
                 verificationCalls += 1;
-                return BuzzNostrIdentityAdapter.verify(input);
+                return buzzIdentityAdapter.verify(input);
               },
             },
           ],
@@ -335,7 +376,7 @@ describe("Buzz Nostr approval ingestion", () => {
           ],
         },
         founders,
-        identityAdapters: [BuzzNostrIdentityAdapter],
+        identityAdapters: [buzzIdentityAdapter],
       }),
     ).toThrow(FoundryGovernanceError);
   });

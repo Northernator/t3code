@@ -171,12 +171,19 @@ An opaque, format-labelled signed event that proves one registered founder appro
 domain-separated subject of a feature contract. The first supported format is a Buzz/Nostr stream
 message. A receiver strictly decodes the event, recomputes its NIP-01 event ID, verifies its Schnorr
 signature and registered signer key, and matches its signed content to the locally derived contract
-subject. Event time is evidence, not unsigned policy state.
+subject and configured Buzz relay community. Event time is evidence, not unsigned policy state.
 
 #### Founder registry
 
 The ordered pair of founder IDs and signing public keys trusted by a Foundry installation. Its hash
 is part of every approval subject, so changing a founder, key, or ordering requires fresh approvals.
+
+#### Acceptance record
+
+The immutable server-local record created after an authenticated request has strictly decoded and
+cryptographically verified both founder approvals. It preserves the original server acceptance time
+and signed-event evidence across semantic replays. It is an audit and idempotency record, not a
+substitute for re-verification before dispatch.
 
 ## Practical Shortcuts
 
