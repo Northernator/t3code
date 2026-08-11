@@ -229,6 +229,7 @@ export interface OrchestrationIntegrationHarness {
 interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly realCodex?: boolean;
+  readonly localRefNameForCwd?: (cwd: string) => string | null;
 }
 
 export const makeOrchestrationIntegrationHarness = (
@@ -342,14 +343,19 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
           getStatus: () => Effect.die("getStatus should not be called in this test"),
-          refreshLocalStatus: () =>
-            Effect.succeed({
-              isRepo: true,
-              hasPrimaryRemote: false,
-              isDefaultRef: true,
-              refName: "main",
-              hasWorkingTreeChanges: false,
-              workingTree: { files: [], insertions: 0, deletions: 0 },
+          refreshLocalStatus: (cwd: string) =>
+            Effect.sync(() => {
+              const refName = options?.localRefNameForCwd
+                ? options.localRefNameForCwd(cwd)
+                : "main";
+              return {
+                isRepo: true,
+                hasPrimaryRemote: false,
+                isDefaultRef: refName === "main",
+                refName,
+                hasWorkingTreeChanges: false,
+                workingTree: { files: [], insertions: 0, deletions: 0 },
+              };
             }),
           refreshStatus: () => Effect.die("refreshStatus should not be called in this test"),
           streamStatus: () => Stream.empty,

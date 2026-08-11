@@ -36,6 +36,7 @@
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@noble/curves": "catalog:",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/foundry-governance": "workspace:*",
     "@t3tools/shared": "workspace:*",

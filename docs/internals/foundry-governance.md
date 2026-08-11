@@ -121,32 +121,72 @@ Chat text is untrusted context. Only fields in the approved canonical contract m
 an execution prompt. A prompt change therefore creates a new contract version and requires two new
 approvals.
 
-## Planned boundaries
+## Durable dispatch slice
+
+Migration 042 adds `foundry_dispatch_jobs`, `foundry_dispatch_attempts`, and
+`foundry_dispatch_evidence`. The approval-store transaction inserts the initial queued job alongside
+the immutable packet. SQLite compare-and-set updates select only one claimant, increment a monotonic
+fence, abandon an expired attempt, and enforce the approved retry budget. Heartbeats, evidence, and
+completion all require the current runner ID and fence. A report ID may be replayed only with the
+same canonical payload.
+
+Migration 043 adds a random per-process runner session to the lease. The same process can reattach
+and renew its current attempt after a WebSocket/server reconnect without increasing the attempt or
+fence, while another process using the same logical runner ID remains fenced out until expiry.
+Pre-session leases retain their original expiry during upgrade, preventing an old worker and a new
+session from overlapping. Terminal evidence and job/attempt completion use one transaction, and even
+an otherwise identical evidence replay must first pass the live runner/session/fence check.
+
+The four authenticated RPC operations expose a deliberately narrower projection than persistence:
+claim returns the raw packet for local reverification; heartbeat renews the current lease; report
+records typed resource correlations or a coarse outcome; status returns attempts and evidence. No
+wire record contains a prompt, local path, provider output, log, credential, or arbitrary diagnostic
+text.
+
+`apps/foundry-runner` is now executable. It resolves a single-use bearer WebSocket connection, checks
+the exact T3 environment, project root and repository identity, provider instance, authentication
+state, model inventory, local primary Git remote, base, branch, and worktree, and then compiles the
+signed contract into deterministic T3 inputs. The T3 endpoint is restricted to the same loopback
+machine because Git attestation is local. It persists `worktree-planned` before worktree creation and
+`turn-planned` before `thread.turn.start`. On restart it adopts a matching
+branch/worktree/thread/message/turn. A differing resource is a hard failure, not an adoption
+candidate.
+
+The terminal reducer merges T3 shell and thread snapshots/events. An approval pause is non-terminal
+for a freshly started turn and keeps receiving heartbeats. A reclaimed turn that is still pending an
+approval is not redispatched: the runner stops renewing, waits through lease expiry, and reconciles
+again under a new fence because provider callback state cannot be proven across a T3 restart. A
+successful dispatch needs both a completed matching turn and a `ready` checkpoint for that same turn;
+interrupted/error turns and missing/error checkpoints fail. The isolated integration proof executes
+one signed fixture through real temporary Git, file SQLite, and production T3 orchestration/checkpoint
+reactors with a scripted local provider, without calling a paid model. This proves the execution
+engine before Buzz transport can enqueue live work.
+
+## Preserved boundaries
 
 The next slices should preserve these interfaces:
 
 - `BuzzIdentityAdapter`: verifies founder identity and signed approval events. The Nostr v1 adapter
   now establishes this interface; relay transport and key provisioning remain future work.
 - `FoundryApprovedContractStore`: atomically records verified packets and immutable approval evidence.
-- `T3Driver`: creates or resumes one project worktree, thread, and turn.
-- `FoundryRunner`: claims approved dispatches and returns hash-bound evidence.
+- `T3Driver`: creates or resumes one project worktree, thread, and turn. The local implementation now
+  enforces the boundary through authenticated T3 RPCs and local Git inspection.
+- `FoundryRunner`: claims approved dispatches and returns hash-bound evidence. The executable local
+  worker now implements this boundary with leases and fencing.
 - `ForgeAdapter`: observes pull-request checks, reviews, and the final merge commit.
 
 ## Current limitations
 
-This now includes authenticated wire ingestion and immutable local persistence, but it does not yet
-connect to a Buzz relay, provision founder keys, dispatch stored contracts automatically, or expose a
-server-backed Council UI. The next slice should add a local runner claim/re-verification boundary and
-make the accepted-contract projection observable without treating that projection as authority.
+This now includes authenticated wire ingestion, atomic durable dispatch, an external RPC runner, and
+one recoverable approval-required T3 turn. It does not yet connect to a Buzz relay, provision founder
+keys, expose a server-backed Council UI, execute repair turns, or enforce time/token/cost budgets.
+Maximum retries bounds dispatch attempts, while maximum turns and the other execution limits remain
+hashed prompt/policy inputs until the gauntlet-loop slice adds durable counters and additional turns.
 
-The local runner binding is trusted configuration for now. The executable runner must build it from
-T3's current provider inventory and verify that the approved provider driver and model still exist
-before claiming a job. Likewise, execution limits are hashed policy values and prompt context in this
-slice; a durable runner must persist attempt, repair, time, and cost counters before it can enforce
-multi-turn or repair loops. There is no external RPC transport, background runner process, or Buzz UI
-wiring yet. That runner must also reconcile T3's local worktree inventory before every create attempt
-and persist the adopted or created worktree, thread, and original command timestamp against the
-dispatch idempotency key.
+The local runner binding remains trusted configuration. Project/provider discovery validates that
+binding against current T3 inventory; it does not let the approved packet create mappings. Automatic
+runner service installation, token provisioning/rotation, rich local diagnostics, and Buzz delivery
+acknowledgements are operational follow-ups.
 
 The MVP will dispatch to one local T3 environment. Cross-machine fan-out, agent-team DAGs, autonomous
 merge, production deployment access, and Graphiti ingestion are later milestones.
