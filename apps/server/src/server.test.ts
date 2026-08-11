@@ -14,6 +14,7 @@ import {
   EventId,
   FoundryApprovedContractIngestError,
   type FoundryApprovedContractPacket,
+  FoundryDispatchRpcError,
   GitCommandError,
   KeybindingRule,
   MessageId,
@@ -104,6 +105,7 @@ const collectQueueUntil = Effect.fn("TransferBudget.collectQueueUntil")(function
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
 import * as FoundryApprovedContractIngestion from "./foundry/FoundryApprovedContractIngestion.ts";
+import * as FoundryDispatch from "./foundry/FoundryDispatch.ts";
 import { makeRoutesLayer } from "./server.ts";
 import { isThreadDetailEvent, resolveAvailableEditorsForConfig } from "./ws.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -291,6 +293,17 @@ const foundryApprovedContractIngestionTestLayer = Layer.succeed(
   }),
 );
 
+const foundryDispatchTestLayer = (
+  overrides?: Partial<FoundryDispatch.FoundryDispatch["Service"]>,
+) =>
+  Layer.mock(FoundryDispatch.FoundryDispatch)({
+    claim: () => Effect.fail(new FoundryDispatchRpcError({ code: "not-configured" })),
+    heartbeat: () => Effect.fail(new FoundryDispatchRpcError({ code: "not-configured" })),
+    report: () => Effect.fail(new FoundryDispatchRpcError({ code: "not-configured" })),
+    get: () => Effect.fail(new FoundryDispatchRpcError({ code: "not-configured" })),
+    ...overrides,
+  });
+
 const structurallyValidFoundryPacket = {
   protocolVersion: 1,
   body: {
@@ -469,6 +482,7 @@ const buildAppUnderTest = (options?: {
     desktopTelemetryReceiver?: Partial<
       DesktopTelemetryReceiver.DesktopTelemetryReceiver["Service"]
     >;
+    foundryDispatch?: Partial<FoundryDispatch.FoundryDispatch["Service"]>;
   };
 }) =>
   Effect.gen(function* () {
@@ -876,6 +890,7 @@ const buildAppUnderTest = (options?: {
 
     const appLayer = servedRoutesLayer.pipe(
       Layer.provide(foundryApprovedContractIngestionTestLayer),
+      Layer.provide(foundryDispatchTestLayer(options?.layers?.foundryDispatch)),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(
@@ -4071,6 +4086,38 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.shellResumeCompletionMarker, true);
       assert.equal(response.threadResumeCompletionMarker, true);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes authenticated Foundry dispatch status requests through the domain service",
+    () =>
+      Effect.gen(function* () {
+        const inputs: string[] = [];
+        yield* buildAppUnderTest({
+          layers: {
+            foundryDispatch: {
+              get: (input) => {
+                inputs.push(input.dispatchIdempotencyKey);
+                return Effect.fail(new FoundryDispatchRpcError({ code: "not-found" }));
+              },
+            },
+          },
+        });
+
+        const dispatchIdempotencyKey = "5".repeat(64);
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const error = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.foundryGetDispatch]({ dispatchIdempotencyKey }).pipe(Effect.flip),
+          ),
+        );
+
+        assert.equal(error._tag, "FoundryDispatchRpcError");
+        if (error._tag === "FoundryDispatchRpcError") {
+          assert.equal(error.code, "not-found");
+        }
+        assert.deepEqual(inputs, [dispatchIdempotencyKey]);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("does not block server config when editor discovery never resolves", () =>

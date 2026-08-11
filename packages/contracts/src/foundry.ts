@@ -1,6 +1,15 @@
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { CheckpointRef, CommandId, IsoDateTime, ThreadId, TurnId } from "./baseSchemas.ts";
+import {
+  CheckpointRef,
+  CommandId,
+  IsoDateTime,
+  MessageId,
+  ThreadId,
+  TurnId,
+} from "./baseSchemas.ts";
 
 const strictDecodeOptions = {
   errors: "all",
@@ -52,9 +61,9 @@ export const FoundryDispatchReportId = Hex64;
 export type FoundryDispatchReportId = typeof FoundryDispatchReportId.Type;
 const FoundryDispatchTimestamp = IsoDateTime.check(
   Schema.makeFilter((value) => {
-    const epochMilliseconds = Date.parse(value);
+    const parsed = DateTime.make(value);
     return (
-      (Number.isFinite(epochMilliseconds) && new Date(epochMilliseconds).toISOString() === value) ||
+      (Option.isSome(parsed) && DateTime.formatIso(parsed.value) === value) ||
       "Foundry dispatch timestamps must be canonical UTC ISO timestamps."
     );
   }),
@@ -289,6 +298,7 @@ const FoundryTurnPlannedReport = Schema.Struct({
   evidenceKey: FoundryDispatchEvidenceKey,
   threadId: ThreadId,
   commandId: CommandId,
+  messageId: MessageId,
   createdAt: FoundryDispatchTimestamp,
 });
 const FoundryTurnStartedReport = Schema.Struct({
@@ -385,6 +395,7 @@ export const FoundryDispatchStatus = Schema.Struct({
   contractHash: Hex64,
   environmentId: Identifier,
   state: FoundryDispatchState,
+  failureCode: Schema.NullOr(FoundryDispatchFailureCode),
   fenceToken: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
   attemptCount: Schema.Int.check(
     Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
@@ -399,9 +410,11 @@ export const FoundryDispatchStatus = Schema.Struct({
     Schema.makeFilter((dispatch) => {
       const terminal = dispatch.state === "succeeded" || dispatch.state === "failed";
       return (
-        (terminal && dispatch.completedAt !== null) ||
-        (!terminal && dispatch.completedAt === null) ||
-        "Foundry dispatch completion must match its state."
+        (((terminal && dispatch.completedAt !== null) ||
+          (!terminal && dispatch.completedAt === null)) &&
+          ((dispatch.state === "failed" && dispatch.failureCode !== null) ||
+            (dispatch.state !== "failed" && dispatch.failureCode === null))) ||
+        "Foundry dispatch completion and failure must match its state."
       );
     }),
   )

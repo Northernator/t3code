@@ -199,7 +199,7 @@ layer("FoundryDispatchStore", (it) => {
         reportId: "5".repeat(64),
         kind: "turn-planned",
         payloadJson:
-          '{"kind":"turn-planned","threadId":"foundry-thread-33333333333333333333333333333333","commandId":"foundry-command-33333333333333333333333333333333","createdAt":"2026-08-11T12:00:00.000Z"}',
+          '{"kind":"turn-planned","evidenceKey":"7777777777777777777777777777777777777777777777777777777777777777","threadId":"foundry-thread-33333333333333333333333333333333","commandId":"foundry-command-33333333333333333333333333333333","messageId":"foundry-message-33333333333333333333333333333333","createdAt":"2026-08-11T12:00:00.000Z"}',
         recordedAt: "2026-08-11T12:00:10.000Z",
       } as const;
       const recorded = yield* store.recordEvidence(evidenceInput);

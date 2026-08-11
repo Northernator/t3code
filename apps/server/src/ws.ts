@@ -108,6 +108,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as FoundryApprovedContractIngestion from "./foundry/FoundryApprovedContractIngestion.ts";
+import * as FoundryDispatch from "./foundry/FoundryDispatch.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
@@ -353,6 +354,7 @@ const makeWsRpcLayer = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   foundryApprovedContractIngestion: FoundryApprovedContractIngestion.FoundryApprovedContractIngestion["Service"],
+  foundryDispatch: FoundryDispatch.FoundryDispatch["Service"],
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -1041,6 +1043,22 @@ const makeWsRpcLayer = (
             foundryApprovedContractIngestion.ingest(packet),
             { "rpc.aggregate": "foundry" },
           ),
+        [WS_METHODS.foundryClaimDispatch]: (input) =>
+          observeRpcEffect(WS_METHODS.foundryClaimDispatch, foundryDispatch.claim(input), {
+            "rpc.aggregate": "foundry",
+          }),
+        [WS_METHODS.foundryHeartbeatDispatch]: (input) =>
+          observeRpcEffect(WS_METHODS.foundryHeartbeatDispatch, foundryDispatch.heartbeat(input), {
+            "rpc.aggregate": "foundry",
+          }),
+        [WS_METHODS.foundryReportDispatch]: (input) =>
+          observeRpcEffect(WS_METHODS.foundryReportDispatch, foundryDispatch.report(input), {
+            "rpc.aggregate": "foundry",
+          }),
+        [WS_METHODS.foundryGetDispatch]: (input) =>
+          observeRpcEffect(WS_METHODS.foundryGetDispatch, foundryDispatch.get(input), {
+            "rpc.aggregate": "foundry",
+          }),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -2274,6 +2292,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
     const pullRequests = yield* PullRequestService.PullRequestService;
     const foundryApprovedContractIngestion =
       yield* FoundryApprovedContractIngestion.FoundryApprovedContractIngestion;
+    const foundryDispatch = yield* FoundryDispatch.FoundryDispatch;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -2293,7 +2312,12 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           disableTracing: true,
         }).pipe(
           Effect.provide(
-            makeWsRpcLayer(session, previewAutomationBroker, foundryApprovedContractIngestion).pipe(
+            makeWsRpcLayer(
+              session,
+              previewAutomationBroker,
+              foundryApprovedContractIngestion,
+              foundryDispatch,
+            ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),

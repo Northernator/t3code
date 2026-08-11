@@ -106,8 +106,10 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import { FoundryApprovedContractIngestionLive } from "./foundry/FoundryApprovedContractIngestion.ts";
+import { FoundryDispatchLive } from "./foundry/FoundryDispatch.ts";
 import { FoundryConfigLive } from "./foundry/FoundryConfig.ts";
 import { FoundryApprovedContractStoreLive } from "./persistence/Layers/FoundryApprovedContractStore.ts";
+import { FoundryDispatchStoreLive } from "./persistence/Layers/FoundryDispatchStore.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -167,9 +169,13 @@ const BackgroundLayerLive = BackgroundPolicy.layer.pipe(
 
 const UsageLayerLive = UsageService.layer.pipe(Layer.provide(ServerSettingsLayerLive));
 
-const FoundryLayerLive = FoundryApprovedContractIngestionLive.pipe(
+const FoundryLayerLive = Layer.mergeAll(
+  FoundryApprovedContractIngestionLive,
+  FoundryDispatchLive,
+).pipe(
   Layer.provide(FoundryConfigLive),
   Layer.provide(FoundryApprovedContractStoreLive),
+  Layer.provide(FoundryDispatchStoreLive),
 );
 
 const ResourceDiagnosticsLayerLive = Layer.mergeAll(

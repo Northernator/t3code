@@ -41,6 +41,18 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.foundryIngestApprovedContract)).toBe(
       AuthOrchestrationOperateScope,
     );
+    expect(requiredScopeForRpcMethod(WS_METHODS.foundryClaimDispatch)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.foundryHeartbeatDispatch)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.foundryReportDispatch)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.foundryGetDispatch)).toBe(
+      AuthOrchestrationReadScope,
+    );
   });
 
   it("reads the reviewer menu under the same scope as the pull request it belongs to", () => {

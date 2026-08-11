@@ -126,6 +126,7 @@ const runningJob = {
   contractHash: storedRecord.contractHash,
   environmentId: body.execution.environmentId,
   state: "running",
+  failureCode: null,
   fenceToken: 1,
   attemptCount: 1,
   createdAt: "2026-08-11T12:00:00.000Z",
@@ -360,6 +361,7 @@ describe("Foundry wire contracts", () => {
         evidenceKey: "7".repeat(64),
         threadId: "foundry-thread-1",
         commandId: "foundry-command-1",
+        messageId: "foundry-message-1",
         createdAt: "2026-08-11T12:01:00.000Z",
       },
     } as const;
@@ -371,6 +373,18 @@ describe("Foundry wire contracts", () => {
     ).toEqual({ dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey });
     expect(() => decodeHeartbeatDispatchInput({ ...lease, fenceToken: 0 })).toThrow();
     expect(() => decodeHeartbeatDispatchInput({ ...lease, leaseToken: "secret" })).toThrow();
+    expect(() =>
+      decodeReportDispatchInput({
+        ...report,
+        report: {
+          kind: "turn-planned",
+          evidenceKey: report.report.evidenceKey,
+          threadId: report.report.threadId,
+          commandId: report.report.commandId,
+          createdAt: report.report.createdAt,
+        },
+      }),
+    ).toThrow();
     expect(() =>
       decodeReportDispatchInput({
         ...report,
