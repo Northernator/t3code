@@ -47,6 +47,9 @@ export const FoundryDispatchIdempotencyKey = Hex64;
 export type FoundryDispatchIdempotencyKey = typeof FoundryDispatchIdempotencyKey.Type;
 export const FoundryRunnerId = Identifier;
 export type FoundryRunnerId = typeof FoundryRunnerId.Type;
+/** Random process identity retained across WebSocket reconnects, but not process restarts. */
+export const FoundryRunnerSessionId = Hex64;
+export type FoundryRunnerSessionId = typeof FoundryRunnerSessionId.Type;
 export const FoundryDispatchFenceToken = Schema.Int.check(
   Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
 );
@@ -424,6 +427,7 @@ export type FoundryDispatchStatus = typeof FoundryDispatchStatus.Type;
 export const FoundryClaimDispatchInput = Schema.Struct({
   environmentId: Identifier,
   runnerId: FoundryRunnerId,
+  runnerSessionId: FoundryRunnerSessionId,
 }).annotate({ parseOptions: strictDecodeOptions });
 export type FoundryClaimDispatchInput = typeof FoundryClaimDispatchInput.Type;
 
@@ -458,6 +462,7 @@ export type FoundryClaimDispatchResult = typeof FoundryClaimDispatchResult.Type;
 const FoundryDispatchLeaseInputFields = {
   dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
   runnerId: FoundryRunnerId,
+  runnerSessionId: FoundryRunnerSessionId,
   fenceToken: FoundryDispatchFenceToken,
 } as const;
 

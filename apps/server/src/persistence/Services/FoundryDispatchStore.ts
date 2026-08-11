@@ -9,6 +9,7 @@ import {
   FoundryDispatchReportId,
   FoundryDispatchState,
   FoundryRunnerId,
+  FoundryRunnerSessionId,
   IsoDateTime,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -52,6 +53,7 @@ export const FoundryDispatchJob = Schema.Struct({
   attemptCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   maxAttempts: MaximumAttempts,
   leaseOwner: Schema.NullOr(Identifier),
+  leaseSessionId: Schema.NullOr(FoundryRunnerSessionId),
   leaseExpiresAt: Schema.NullOr(IsoDateTime),
   commandCreatedAt: IsoDateTime,
   createdAt: IsoDateTime,
@@ -66,6 +68,7 @@ export const FoundryDispatchAttempt = Schema.Struct({
   attemptNumber: FoundryDispatchAttemptNumber,
   fenceToken: FoundryDispatchFenceToken,
   runnerId: FoundryRunnerId,
+  runnerSessionId: Schema.NullOr(FoundryRunnerSessionId),
   state: FoundryDispatchAttemptState,
   claimedAt: IsoDateTime,
   lastHeartbeatAt: IsoDateTime,
@@ -109,6 +112,7 @@ export type FoundryDispatchStatus = typeof FoundryDispatchStatus.Type;
 export const ClaimFoundryDispatchInput = Schema.Struct({
   environmentId: Identifier,
   runnerId: FoundryRunnerId,
+  runnerSessionId: FoundryRunnerSessionId,
   claimedAt: IsoDateTime,
   leaseExpiresAt: IsoDateTime,
 });
@@ -117,6 +121,7 @@ export type ClaimFoundryDispatchInput = typeof ClaimFoundryDispatchInput.Type;
 export const HeartbeatFoundryDispatchInput = Schema.Struct({
   dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
   runnerId: FoundryRunnerId,
+  runnerSessionId: FoundryRunnerSessionId,
   fenceToken: FoundryDispatchFenceToken,
   heartbeatAt: IsoDateTime,
   leaseExpiresAt: IsoDateTime,
@@ -126,6 +131,7 @@ export type HeartbeatFoundryDispatchInput = typeof HeartbeatFoundryDispatchInput
 export const CompleteFoundryDispatchInput = Schema.Struct({
   dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
   runnerId: FoundryRunnerId,
+  runnerSessionId: FoundryRunnerSessionId,
   fenceToken: FoundryDispatchFenceToken,
   completedAt: IsoDateTime,
   outcome: FoundryDispatchTerminalState,
@@ -136,6 +142,7 @@ export type CompleteFoundryDispatchInput = typeof CompleteFoundryDispatchInput.T
 export const RecordFoundryDispatchEvidenceInput = Schema.Struct({
   dispatchIdempotencyKey: FoundryDispatchIdempotencyKey,
   runnerId: FoundryRunnerId,
+  runnerSessionId: FoundryRunnerSessionId,
   fenceToken: FoundryDispatchFenceToken,
   reportId: FoundryDispatchReportId,
   kind: Identifier,
@@ -143,6 +150,19 @@ export const RecordFoundryDispatchEvidenceInput = Schema.Struct({
   recordedAt: IsoDateTime,
 });
 export type RecordFoundryDispatchEvidenceInput = typeof RecordFoundryDispatchEvidenceInput.Type;
+
+export const FinalizeFoundryDispatchInput = Schema.Struct({
+  ...RecordFoundryDispatchEvidenceInput.fields,
+  outcome: FoundryDispatchTerminalState,
+  failureCode: Schema.NullOr(FoundryDispatchFailureCode),
+});
+export type FinalizeFoundryDispatchInput = typeof FinalizeFoundryDispatchInput.Type;
+
+export interface FoundryDispatchFinalizationResult {
+  readonly disposition: FoundryDispatchEvidenceResult["disposition"];
+  readonly evidence: FoundryDispatchEvidence;
+  readonly status: FoundryDispatchStatus;
+}
 
 export class FoundryDispatchLeaseError extends Schema.TaggedErrorClass<FoundryDispatchLeaseError>()(
   "FoundryDispatchLeaseError",
@@ -154,7 +174,7 @@ export class FoundryDispatchLeaseError extends Schema.TaggedErrorClass<FoundryDi
   override get message(): string {
     return this.reason === "invalid-lease"
       ? "The dispatch lease must expire after the operation timestamp."
-      : "The dispatch lease is no longer owned by this runner and fencing token.";
+      : "The dispatch lease is no longer owned by this runner session and fencing token.";
   }
 }
 
@@ -192,6 +212,10 @@ export interface FoundryDispatchStoreShape {
   readonly recordEvidence: (
     input: RecordFoundryDispatchEvidenceInput,
   ) => Effect.Effect<FoundryDispatchEvidenceResult, FoundryDispatchStoreError>;
+
+  readonly finalizeWithEvidence: (
+    input: FinalizeFoundryDispatchInput,
+  ) => Effect.Effect<FoundryDispatchFinalizationResult, FoundryDispatchStoreError>;
 
   readonly readStatus: (
     dispatchIdempotencyKey: string,

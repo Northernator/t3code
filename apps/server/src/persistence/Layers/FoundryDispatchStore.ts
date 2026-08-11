@@ -63,6 +63,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
         attempt_count AS "attemptCount",
         max_attempts AS "maxAttempts",
         lease_owner AS "leaseOwner",
+        lease_session_id AS "leaseSessionId",
         lease_expires_at AS "leaseExpiresAt",
         command_created_at AS "commandCreatedAt",
         created_at AS "createdAt",
@@ -83,6 +84,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
         attempt_number AS "attemptNumber",
         fence_token AS "fenceToken",
         runner_id AS "runnerId",
+        runner_session_id AS "runnerSessionId",
         state,
         claimed_at AS "claimedAt",
         last_heartbeat_at AS "lastHeartbeatAt",
@@ -104,6 +106,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
         attempt_number AS "attemptNumber",
         fence_token AS "fenceToken",
         runner_id AS "runnerId",
+        runner_session_id AS "runnerSessionId",
         state,
         claimed_at AS "claimedAt",
         last_heartbeat_at AS "lastHeartbeatAt",
@@ -233,6 +236,81 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
     return yield* sql
       .withTransaction(
         Effect.gen(function* () {
+          const reattachedRows = yield* sql<typeof FoundryDispatchJob.Type>`
+            UPDATE foundry_dispatch_jobs
+            SET
+              lease_expires_at = CASE
+                WHEN lease_expires_at < ${input.leaseExpiresAt} THEN ${input.leaseExpiresAt}
+                ELSE lease_expires_at
+              END,
+              updated_at = ${input.claimedAt}
+            WHERE dispatch_id = (
+              SELECT dispatch_id
+              FROM foundry_dispatch_jobs
+              WHERE environment_id = ${input.environmentId}
+                AND state = 'running'
+                AND lease_owner = ${input.runnerId}
+                AND lease_session_id = ${input.runnerSessionId}
+                AND lease_expires_at > ${input.claimedAt}
+              ORDER BY created_at ASC, dispatch_id ASC
+              LIMIT 1
+            )
+              AND environment_id = ${input.environmentId}
+              AND state = 'running'
+              AND lease_owner = ${input.runnerId}
+              AND lease_session_id = ${input.runnerSessionId}
+              AND lease_expires_at > ${input.claimedAt}
+            RETURNING
+              dispatch_id AS "dispatchId",
+              dispatch_idempotency_key AS "dispatchIdempotencyKey",
+              contract_hash AS "contractHash",
+              environment_id AS "environmentId",
+              branch,
+              base_sha AS "baseSha",
+              state,
+              fence_token AS "fenceToken",
+              attempt_count AS "attemptCount",
+              max_attempts AS "maxAttempts",
+              lease_owner AS "leaseOwner",
+              lease_session_id AS "leaseSessionId",
+              lease_expires_at AS "leaseExpiresAt",
+              command_created_at AS "commandCreatedAt",
+              created_at AS "createdAt",
+              updated_at AS "updatedAt",
+              completed_at AS "completedAt",
+              failure_code AS "failureCode"
+          `;
+          if (reattachedRows.length === 1) {
+            const job = yield* decodeDispatchJob(reattachedRows[0]).pipe(
+              Effect.mapError((cause) =>
+                PersistenceDecodeError.fromSchemaError(
+                  "FoundryDispatchStore.claimNext:decodeReattachedJob",
+                  cause,
+                ),
+              ),
+            );
+            const renewedAttempts = yield* sql<{ readonly dispatchId: string }>`
+              UPDATE foundry_dispatch_attempts
+              SET
+                last_heartbeat_at = ${input.claimedAt},
+                lease_expires_at = ${job.leaseExpiresAt}
+              WHERE dispatch_id = ${job.dispatchId}
+                AND attempt_number = ${job.attemptCount}
+                AND fence_token = ${job.fenceToken}
+                AND runner_id = ${input.runnerId}
+                AND runner_session_id = ${input.runnerSessionId}
+                AND state = 'running'
+              RETURNING dispatch_id AS "dispatchId"
+            `;
+            if (renewedAttempts.length !== 1) {
+              return yield* new PersistenceDecodeError({
+                operation: "FoundryDispatchStore.claimNext",
+                issue: "MissingReattachedAttempt",
+              });
+            }
+            return Option.some(yield* loadClaim(job));
+          }
+
           yield* sql`
             UPDATE foundry_dispatch_attempts
             SET
@@ -254,6 +332,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
             SET
               state = 'failed',
               lease_owner = NULL,
+              lease_session_id = NULL,
               lease_expires_at = NULL,
               updated_at = ${input.claimedAt},
               completed_at = ${input.claimedAt},
@@ -271,6 +350,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               fence_token = fence_token + 1,
               attempt_count = attempt_count + 1,
               lease_owner = ${input.runnerId},
+              lease_session_id = ${input.runnerSessionId},
               lease_expires_at = ${input.leaseExpiresAt},
               updated_at = ${input.claimedAt},
               completed_at = NULL,
@@ -287,7 +367,15 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
                     AND attempt_count < max_attempts
                   )
                 )
-              ORDER BY created_at ASC, dispatch_id ASC
+              ORDER BY
+                CASE
+                  WHEN lease_owner = ${input.runnerId}
+                    AND lease_session_id = ${input.runnerSessionId}
+                  THEN 0
+                  ELSE 1
+                END ASC,
+                created_at ASC,
+                dispatch_id ASC
               LIMIT 1
             )
               AND environment_id = ${input.environmentId}
@@ -311,6 +399,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               attempt_count AS "attemptCount",
               max_attempts AS "maxAttempts",
               lease_owner AS "leaseOwner",
+              lease_session_id AS "leaseSessionId",
               lease_expires_at AS "leaseExpiresAt",
               command_created_at AS "commandCreatedAt",
               created_at AS "createdAt",
@@ -347,6 +436,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               attempt_number,
               fence_token,
               runner_id,
+              runner_session_id,
               state,
               claimed_at,
               last_heartbeat_at,
@@ -358,6 +448,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               ${job.attemptCount},
               ${job.fenceToken},
               ${input.runnerId},
+              ${input.runnerSessionId},
               ${"running"},
               ${input.claimedAt},
               ${input.claimedAt},
@@ -398,6 +489,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
             WHERE dispatch_idempotency_key = ${input.dispatchIdempotencyKey}
               AND state = 'running'
               AND lease_owner = ${input.runnerId}
+              AND lease_session_id = ${input.runnerSessionId}
               AND fence_token = ${input.fenceToken}
               AND lease_expires_at > ${input.heartbeatAt}
             RETURNING
@@ -412,6 +504,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               attempt_count AS "attemptCount",
               max_attempts AS "maxAttempts",
               lease_owner AS "leaseOwner",
+              lease_session_id AS "leaseSessionId",
               lease_expires_at AS "leaseExpiresAt",
               command_created_at AS "commandCreatedAt",
               created_at AS "createdAt",
@@ -439,6 +532,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               AND attempt_number = ${job.attemptCount}
               AND fence_token = ${input.fenceToken}
               AND runner_id = ${input.runnerId}
+              AND runner_session_id = ${input.runnerSessionId}
               AND state = 'running'
             RETURNING dispatch_id AS "dispatchId"
           `;
@@ -458,9 +552,9 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
       );
   });
 
-  const complete: FoundryDispatchStoreShape["complete"] = Effect.fn(
-    "FoundryDispatchStore.complete",
-  )(function* (input) {
+  const completeInTransaction = Effect.fn("FoundryDispatchStore.completeInTransaction")(function* (
+    input: Parameters<FoundryDispatchStoreShape["complete"]>[0],
+  ) {
     if (
       (input.outcome === "succeeded" && input.failureCode !== null) ||
       (input.outcome === "failed" && input.failureCode === null)
@@ -468,14 +562,12 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
       return yield* leaseLost(input.dispatchIdempotencyKey);
     }
 
-    return yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const completed = yield* sql<typeof FoundryDispatchJob.Type>`
+    const completed = yield* sql<typeof FoundryDispatchJob.Type>`
             UPDATE foundry_dispatch_jobs
             SET
               state = ${input.outcome},
               lease_owner = NULL,
+              lease_session_id = NULL,
               lease_expires_at = NULL,
               updated_at = ${input.completedAt},
               completed_at = ${input.completedAt},
@@ -483,6 +575,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
             WHERE dispatch_idempotency_key = ${input.dispatchIdempotencyKey}
               AND state = 'running'
               AND lease_owner = ${input.runnerId}
+              AND lease_session_id = ${input.runnerSessionId}
               AND fence_token = ${input.fenceToken}
               AND lease_expires_at > ${input.completedAt}
             RETURNING
@@ -497,6 +590,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               attempt_count AS "attemptCount",
               max_attempts AS "maxAttempts",
               lease_owner AS "leaseOwner",
+              lease_session_id AS "leaseSessionId",
               lease_expires_at AS "leaseExpiresAt",
               command_created_at AS "commandCreatedAt",
               created_at AS "createdAt",
@@ -505,46 +599,44 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               failure_code AS "failureCode"
           `;
 
-          let job: typeof FoundryDispatchJob.Type;
-          if (completed.length === 0) {
-            const existing = yield* findJob(input.dispatchIdempotencyKey);
-            if (
-              Option.isNone(existing) ||
-              existing.value.state !== input.outcome ||
-              existing.value.fenceToken !== input.fenceToken ||
-              existing.value.failureCode !== input.failureCode
-            ) {
-              return yield* leaseLost(input.dispatchIdempotencyKey);
-            }
-            const existingAttempt = yield* findAttempt({
-              dispatchId: existing.value.dispatchId,
-              attemptNumber: existing.value.attemptCount,
-            }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "FoundryDispatchStore.complete:existingAttemptQuery",
-                  "FoundryDispatchStore.complete:decodeExistingAttempt",
-                ),
-              ),
-            );
-            if (
-              Option.isNone(existingAttempt) ||
-              existingAttempt.value.runnerId !== input.runnerId ||
-              existingAttempt.value.fenceToken !== input.fenceToken
-            ) {
-              return yield* leaseLost(input.dispatchIdempotencyKey);
-            }
-            job = existing.value;
-          } else {
-            job = yield* decodeDispatchJob(completed[0]).pipe(
-              Effect.mapError((cause) =>
-                PersistenceDecodeError.fromSchemaError(
-                  "FoundryDispatchStore.complete:decodeJob",
-                  cause,
-                ),
-              ),
-            );
-            const completedAttempts = yield* sql<{ readonly dispatchId: string }>`
+    let job: typeof FoundryDispatchJob.Type;
+    if (completed.length === 0) {
+      const existing = yield* findJob(input.dispatchIdempotencyKey);
+      if (
+        Option.isNone(existing) ||
+        existing.value.state !== input.outcome ||
+        existing.value.fenceToken !== input.fenceToken ||
+        existing.value.failureCode !== input.failureCode
+      ) {
+        return yield* leaseLost(input.dispatchIdempotencyKey);
+      }
+      const existingAttempt = yield* findAttempt({
+        dispatchId: existing.value.dispatchId,
+        attemptNumber: existing.value.attemptCount,
+      }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "FoundryDispatchStore.complete:existingAttemptQuery",
+            "FoundryDispatchStore.complete:decodeExistingAttempt",
+          ),
+        ),
+      );
+      if (
+        Option.isNone(existingAttempt) ||
+        existingAttempt.value.runnerId !== input.runnerId ||
+        existingAttempt.value.runnerSessionId !== input.runnerSessionId ||
+        existingAttempt.value.fenceToken !== input.fenceToken
+      ) {
+        return yield* leaseLost(input.dispatchIdempotencyKey);
+      }
+      job = existing.value;
+    } else {
+      job = yield* decodeDispatchJob(completed[0]).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError("FoundryDispatchStore.complete:decodeJob", cause),
+        ),
+      );
+      const completedAttempts = yield* sql<{ readonly dispatchId: string }>`
               UPDATE foundry_dispatch_attempts
               SET
                 state = ${input.outcome},
@@ -554,19 +646,25 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
                 AND attempt_number = ${job.attemptCount}
                 AND fence_token = ${input.fenceToken}
                 AND runner_id = ${input.runnerId}
+                AND runner_session_id = ${input.runnerSessionId}
                 AND state = 'running'
               RETURNING dispatch_id AS "dispatchId"
             `;
-            if (completedAttempts.length !== 1) {
-              return yield* new PersistenceDecodeError({
-                operation: "FoundryDispatchStore.complete",
-                issue: "MissingCurrentAttempt",
-              });
-            }
-          }
-          return yield* loadStatus(job);
-        }),
-      )
+      if (completedAttempts.length !== 1) {
+        return yield* new PersistenceDecodeError({
+          operation: "FoundryDispatchStore.complete",
+          issue: "MissingCurrentAttempt",
+        });
+      }
+    }
+    return yield* loadStatus(job);
+  });
+
+  const complete: FoundryDispatchStoreShape["complete"] = Effect.fn(
+    "FoundryDispatchStore.complete",
+  )(function* (input) {
+    return yield* sql
+      .withTransaction(completeInTransaction(input))
       .pipe(
         Effect.catchTag("SqlError", (cause) =>
           Effect.fail(toPersistenceSqlError("FoundryDispatchStore.complete:transaction")(cause)),
@@ -574,70 +672,84 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
       );
   });
 
-  const recordEvidence: FoundryDispatchStoreShape["recordEvidence"] = Effect.fn(
-    "FoundryDispatchStore.recordEvidence",
-  )(function* (input) {
-    return yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const job = yield* findJob(input.dispatchIdempotencyKey);
-          if (Option.isNone(job)) {
-            return yield* leaseLost(input.dispatchIdempotencyKey);
-          }
+  const recordEvidenceInTransaction = Effect.fn("FoundryDispatchStore.recordEvidenceInTransaction")(
+    function* (input: Parameters<FoundryDispatchStoreShape["recordEvidence"]>[0]) {
+      const job = yield* findJob(input.dispatchIdempotencyKey);
+      if (Option.isNone(job)) {
+        return yield* leaseLost(input.dispatchIdempotencyKey);
+      }
 
-          const existing = yield* findEvidence({
-            dispatchId: job.value.dispatchId,
-            attemptNumber: job.value.attemptCount,
-            reportId: input.reportId,
-          }).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError(
-                "FoundryDispatchStore.recordEvidence:existingQuery",
-                "FoundryDispatchStore.recordEvidence:decodeExisting",
-              ),
+      const existing = yield* findEvidence({
+        dispatchId: job.value.dispatchId,
+        attemptNumber: job.value.attemptCount,
+        reportId: input.reportId,
+      }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "FoundryDispatchStore.recordEvidence:existingQuery",
+            "FoundryDispatchStore.recordEvidence:decodeExisting",
+          ),
+        ),
+      );
+      if (Option.isSome(existing)) {
+        const existingAttempt = yield* findAttempt({
+          dispatchId: job.value.dispatchId,
+          attemptNumber: existing.value.attemptNumber,
+        }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "FoundryDispatchStore.recordEvidence:existingAttemptQuery",
+              "FoundryDispatchStore.recordEvidence:decodeExistingAttempt",
             ),
-          );
-          if (Option.isSome(existing)) {
-            const existingAttempt = yield* findAttempt({
-              dispatchId: job.value.dispatchId,
-              attemptNumber: existing.value.attemptNumber,
-            }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "FoundryDispatchStore.recordEvidence:existingAttemptQuery",
-                  "FoundryDispatchStore.recordEvidence:decodeExistingAttempt",
-                ),
-              ),
-            );
-            if (
-              Option.isNone(existingAttempt) ||
-              existingAttempt.value.runnerId !== input.runnerId ||
-              existing.value.fenceToken !== input.fenceToken ||
-              existing.value.kind !== input.kind ||
-              existing.value.payloadJson !== input.payloadJson
-            ) {
-              return yield* new FoundryDispatchEvidenceConflictError({
-                dispatchIdempotencyKey: input.dispatchIdempotencyKey,
-                reportId: input.reportId,
-              });
-            }
-            return { disposition: "replayed", evidence: existing.value } as const;
-          }
+          ),
+        );
+        if (Option.isNone(existingAttempt)) {
+          return yield* new PersistenceDecodeError({
+            operation: "FoundryDispatchStore.recordEvidence",
+            issue: "MissingEvidenceAttempt",
+          });
+        }
+        if (
+          existingAttempt.value.runnerId !== input.runnerId ||
+          existingAttempt.value.runnerSessionId !== input.runnerSessionId ||
+          existingAttempt.value.fenceToken !== input.fenceToken ||
+          existing.value.fenceToken !== input.fenceToken
+        ) {
+          return yield* leaseLost(input.dispatchIdempotencyKey);
+        }
+        if (
+          existing.value.kind !== input.kind ||
+          existing.value.payloadJson !== input.payloadJson
+        ) {
+          return yield* new FoundryDispatchEvidenceConflictError({
+            dispatchIdempotencyKey: input.dispatchIdempotencyKey,
+            reportId: input.reportId,
+          });
+        }
+        if (
+          job.value.attemptCount !== existing.value.attemptNumber ||
+          job.value.fenceToken !== input.fenceToken
+        ) {
+          return yield* leaseLost(input.dispatchIdempotencyKey);
+        }
+        return { disposition: "replayed", evidence: existing.value } as const;
+      }
 
-          if (
-            job.value.state !== "running" ||
-            job.value.leaseOwner !== input.runnerId ||
-            job.value.fenceToken !== input.fenceToken ||
-            job.value.leaseExpiresAt === null ||
-            job.value.leaseExpiresAt <= input.recordedAt
-          ) {
-            return yield* leaseLost(input.dispatchIdempotencyKey);
-          }
+      if (
+        job.value.state !== "running" ||
+        job.value.leaseOwner !== input.runnerId ||
+        job.value.leaseSessionId !== input.runnerSessionId ||
+        job.value.fenceToken !== input.fenceToken ||
+        job.value.leaseExpiresAt === null ||
+        job.value.leaseExpiresAt <= input.recordedAt
+      ) {
+        return yield* leaseLost(input.dispatchIdempotencyKey);
+      }
 
-          const inserted = yield* SqlSchema.findAll({
-            Request: RecordFoundryDispatchEvidenceInput,
-            Result: InsertedEvidenceRow,
-            execute: (request) => sql`
+      const inserted = yield* SqlSchema.findAll({
+        Request: RecordFoundryDispatchEvidenceInput,
+        Result: InsertedEvidenceRow,
+        execute: (request) => sql`
               INSERT INTO foundry_dispatch_evidence (
                 dispatch_id,
                 attempt_number,
@@ -657,39 +769,73 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
               )
               RETURNING sequence
             `,
-          })(input).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError(
-                "FoundryDispatchStore.recordEvidence:insert",
-                "FoundryDispatchStore.recordEvidence:encode",
-              ),
-            ),
-          );
-          if (inserted.length !== 1) {
-            return yield* new PersistenceDecodeError({
-              operation: "FoundryDispatchStore.recordEvidence",
-              issue: "MissingInsertedEvidence",
-            });
-          }
-          return {
-            disposition: "recorded",
-            evidence: {
-              sequence: inserted[0]!.sequence,
-              dispatchId: job.value.dispatchId,
-              attemptNumber: job.value.attemptCount,
-              fenceToken: input.fenceToken,
-              reportId: input.reportId,
-              kind: input.kind,
-              payloadJson: input.payloadJson,
-              recordedAt: input.recordedAt,
-            },
-          } as const;
+      })(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "FoundryDispatchStore.recordEvidence:insert",
+            "FoundryDispatchStore.recordEvidence:encode",
+          ),
+        ),
+      );
+      if (inserted.length !== 1) {
+        return yield* new PersistenceDecodeError({
+          operation: "FoundryDispatchStore.recordEvidence",
+          issue: "MissingInsertedEvidence",
+        });
+      }
+      return {
+        disposition: "recorded",
+        evidence: {
+          sequence: inserted[0]!.sequence,
+          dispatchId: job.value.dispatchId,
+          attemptNumber: job.value.attemptCount,
+          fenceToken: input.fenceToken,
+          reportId: input.reportId,
+          kind: input.kind,
+          payloadJson: input.payloadJson,
+          recordedAt: input.recordedAt,
+        },
+      } as const;
+    },
+  );
+
+  const recordEvidence: FoundryDispatchStoreShape["recordEvidence"] = Effect.fn(
+    "FoundryDispatchStore.recordEvidence",
+  )(function* (input) {
+    return yield* sql
+      .withTransaction(recordEvidenceInTransaction(input))
+      .pipe(
+        Effect.catchTag("SqlError", (cause) =>
+          Effect.fail(
+            toPersistenceSqlError("FoundryDispatchStore.recordEvidence:transaction")(cause),
+          ),
+        ),
+      );
+  });
+
+  const finalizeWithEvidence: FoundryDispatchStoreShape["finalizeWithEvidence"] = Effect.fn(
+    "FoundryDispatchStore.finalizeWithEvidence",
+  )(function* (input) {
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const evidence = yield* recordEvidenceInTransaction(input);
+          const status = yield* completeInTransaction({
+            dispatchIdempotencyKey: input.dispatchIdempotencyKey,
+            runnerId: input.runnerId,
+            runnerSessionId: input.runnerSessionId,
+            fenceToken: input.fenceToken,
+            completedAt: input.recordedAt,
+            outcome: input.outcome,
+            failureCode: input.failureCode,
+          });
+          return { ...evidence, status };
         }),
       )
       .pipe(
         Effect.catchTag("SqlError", (cause) =>
           Effect.fail(
-            toPersistenceSqlError("FoundryDispatchStore.recordEvidence:transaction")(cause),
+            toPersistenceSqlError("FoundryDispatchStore.finalizeWithEvidence:transaction")(cause),
           ),
         ),
       );
@@ -709,6 +855,7 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
     heartbeat,
     complete,
     recordEvidence,
+    finalizeWithEvidence,
     readStatus,
   });
 });

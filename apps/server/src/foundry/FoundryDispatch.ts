@@ -237,6 +237,7 @@ const makeFoundryDispatch = Effect.gen(function* () {
 
   const failClaim = Effect.fn("FoundryDispatch.failClaim")(function* (
     claim: StoredFoundryDispatchClaim,
+    runnerSessionId: string,
     failureCode: FoundryDispatchFailureCode,
   ): Effect.fn.Return<never, FoundryDispatchRpcError> {
     const completedAt = DateTime.formatIso(yield* DateTime.now);
@@ -244,6 +245,7 @@ const makeFoundryDispatch = Effect.gen(function* () {
       .complete({
         dispatchIdempotencyKey: claim.job.dispatchIdempotencyKey,
         runnerId: claim.attempt.runnerId,
+        runnerSessionId,
         fenceToken: claim.attempt.fenceToken,
         completedAt,
         outcome: "failed",
@@ -265,6 +267,7 @@ const makeFoundryDispatch = Effect.gen(function* () {
         .claimNext({
           environmentId: configured.environmentId,
           runnerId: input.runnerId,
+          runnerSessionId: input.runnerSessionId,
           claimedAt: lease.observedAt,
           leaseExpiresAt: lease.expiresAt,
         })
@@ -281,7 +284,7 @@ const makeFoundryDispatch = Effect.gen(function* () {
         { concurrency: "unbounded" },
       ).pipe(Effect.mapError(() => wireError("unavailable")));
       if (Option.isNone(packet) || Option.isNone(record)) {
-        return yield* failClaim(claimed.value, "internal");
+        return yield* failClaim(claimed.value, input.runnerSessionId, "internal");
       }
 
       const matches = yield* Effect.try({
@@ -293,9 +296,11 @@ const makeFoundryDispatch = Effect.gen(function* () {
             record: record.value,
           }),
         catch: () => wireError("conflict"),
-      }).pipe(Effect.catch(() => failClaim(claimed.value, "approval-invalid")));
+      }).pipe(
+        Effect.catch(() => failClaim(claimed.value, input.runnerSessionId, "approval-invalid")),
+      );
       if (!matches) {
-        return yield* failClaim(claimed.value, "approval-invalid");
+        return yield* failClaim(claimed.value, input.runnerSessionId, "approval-invalid");
       }
 
       const status = yield* readRequiredStatus(claimed.value.job.dispatchIdempotencyKey);
@@ -336,42 +341,43 @@ const makeFoundryDispatch = Effect.gen(function* () {
     function* (input) {
       yield* ensureConfigured();
       const recordedAt = DateTime.formatIso(yield* DateTime.now);
-      const evidence = yield* dispatchStore
-        .recordEvidence({
-          dispatchIdempotencyKey: input.dispatchIdempotencyKey,
-          runnerId: input.runnerId,
-          fenceToken: input.fenceToken,
-          reportId: input.reportId,
-          kind: input.report.kind,
-          payloadJson: canonicalizeJson(input.report),
-          recordedAt,
-        })
-        .pipe(Effect.mapError(mapStoreError));
+      const evidenceInput = {
+        dispatchIdempotencyKey: input.dispatchIdempotencyKey,
+        runnerId: input.runnerId,
+        runnerSessionId: input.runnerSessionId,
+        fenceToken: input.fenceToken,
+        reportId: input.reportId,
+        kind: input.report.kind,
+        payloadJson: canonicalizeJson(input.report),
+        recordedAt,
+      } as const;
 
-      let storedStatus: StoredFoundryDispatchStatus;
       if (input.report.kind === "succeeded" || input.report.kind === "failed") {
-        storedStatus = yield* dispatchStore
-          .complete({
-            dispatchIdempotencyKey: input.dispatchIdempotencyKey,
-            runnerId: input.runnerId,
-            fenceToken: input.fenceToken,
-            completedAt: recordedAt,
+        const finalized = yield* dispatchStore
+          .finalizeWithEvidence({
+            ...evidenceInput,
             outcome: input.report.kind,
             failureCode: input.report.kind === "failed" ? input.report.failureCode : null,
           })
           .pipe(Effect.mapError(mapStoreError));
-      } else {
-        const current = yield* dispatchStore
-          .readStatus(input.dispatchIdempotencyKey)
-          .pipe(Effect.mapError(() => wireError("unavailable")));
-        if (Option.isNone(current)) {
-          return yield* wireError("not-found");
-        }
-        storedStatus = current.value;
+        return {
+          disposition: finalized.disposition,
+          job: yield* toWireStatus(finalized.status),
+        };
+      }
+
+      const evidence = yield* dispatchStore
+        .recordEvidence(evidenceInput)
+        .pipe(Effect.mapError(mapStoreError));
+      const current = yield* dispatchStore
+        .readStatus(input.dispatchIdempotencyKey)
+        .pipe(Effect.mapError(() => wireError("unavailable")));
+      if (Option.isNone(current)) {
+        return yield* wireError("not-found");
       }
       return {
         disposition: evidence.disposition,
-        job: yield* toWireStatus(storedStatus),
+        job: yield* toWireStatus(current.value),
       };
     },
   );

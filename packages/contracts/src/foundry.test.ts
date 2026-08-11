@@ -8,6 +8,7 @@ import {
   FoundryApprovedContractPacket,
   FoundryApprovedContractRecord,
   FoundryBuzzRelayUrl,
+  FoundryClaimDispatchInput,
   FoundryClaimDispatchResult,
   FoundryDispatchAttemptRecord,
   FoundryDispatchReport,
@@ -37,6 +38,7 @@ const decodeApprovedContractIngestError = Schema.decodeUnknownSync(
 const decodeDispatchAttempt = Schema.decodeUnknownSync(FoundryDispatchAttemptRecord);
 const decodeDispatchReport = Schema.decodeUnknownSync(FoundryDispatchReport);
 const decodeDispatchStatus = Schema.decodeUnknownSync(FoundryDispatchStatus);
+const decodeClaimDispatchInput = Schema.decodeUnknownSync(FoundryClaimDispatchInput);
 const decodeClaimDispatchResult = Schema.decodeUnknownSync(FoundryClaimDispatchResult);
 const decodeHeartbeatDispatchInput = Schema.decodeUnknownSync(FoundryHeartbeatDispatchInput);
 const decodeReportDispatchInput = Schema.decodeUnknownSync(FoundryReportDispatchInput);
@@ -348,9 +350,16 @@ describe("Foundry wire contracts", () => {
   });
 
   it("strictly fences heartbeat and report inputs by dispatch, runner, and token", () => {
+    const runnerSessionId = "5".repeat(64);
+    const claim = {
+      environmentId: body.execution.environmentId,
+      runnerId: "foundry-runner-a",
+      runnerSessionId,
+    } as const;
     const lease = {
       dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey,
       runnerId: "foundry-runner-a",
+      runnerSessionId,
       fenceToken: 1,
     } as const;
     const report = {
@@ -366,11 +375,20 @@ describe("Foundry wire contracts", () => {
       },
     } as const;
 
+    expect(decodeClaimDispatchInput(claim)).toEqual(claim);
     expect(decodeHeartbeatDispatchInput(lease)).toEqual(lease);
     expect(decodeReportDispatchInput(report)).toEqual(report);
     expect(
       decodeGetDispatchInput({ dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey }),
     ).toEqual({ dispatchIdempotencyKey: storedRecord.dispatchIdempotencyKey });
+    expect(() => decodeClaimDispatchInput({ ...claim, runnerSessionId: "short" })).toThrow();
+    expect(() =>
+      decodeHeartbeatDispatchInput({
+        dispatchIdempotencyKey: lease.dispatchIdempotencyKey,
+        runnerId: lease.runnerId,
+        fenceToken: lease.fenceToken,
+      }),
+    ).toThrow();
     expect(() => decodeHeartbeatDispatchInput({ ...lease, fenceToken: 0 })).toThrow();
     expect(() => decodeHeartbeatDispatchInput({ ...lease, leaseToken: "secret" })).toThrow();
     expect(() =>

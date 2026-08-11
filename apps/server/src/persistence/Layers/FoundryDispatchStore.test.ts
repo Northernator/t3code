@@ -18,6 +18,9 @@ const secondExpiry = "2026-08-11T12:03:00.000Z";
 const dispatchIdempotencyKey = "3".repeat(64);
 const dispatchId = `dispatch_${dispatchIdempotencyKey.slice(0, 24)}`;
 const contractHash = "1".repeat(64);
+const runnerOneSessionId = "a".repeat(64);
+const runnerTwoSessionId = "b".repeat(64);
+const replacementSessionId = "c".repeat(64);
 
 const seedDispatch = Effect.fn("seedFoundryDispatch")(function* ({
   maxAttempts = 3,
@@ -98,11 +101,20 @@ const seedDispatch = Effect.fn("seedFoundryDispatch")(function* ({
   `;
 });
 
-const claim = (runnerId: string, claimedAt = acceptedAt, leaseExpiresAt = firstExpiry) =>
+const runnerSession = (runnerId: string) =>
+  runnerId === "runner-one" ? runnerOneSessionId : runnerTwoSessionId;
+
+const claim = (
+  runnerId: string,
+  claimedAt = acceptedAt,
+  leaseExpiresAt = firstExpiry,
+  runnerSessionId = runnerSession(runnerId),
+) =>
   Effect.flatMap(FoundryDispatchStore, (store) =>
     store.claimNext({
       environmentId: "founder-alice-laptop",
       runnerId,
+      runnerSessionId,
       claimedAt,
       leaseExpiresAt,
     }),
@@ -127,7 +139,94 @@ layer("FoundryDispatchStore", (it) => {
         assert.equal(winner.value.job.attemptCount, 1);
         assert.equal(winner.value.job.fenceToken, 1);
         assert.equal(winner.value.attempt.runnerId, winner.value.job.leaseOwner);
+        assert.equal(winner.value.attempt.runnerSessionId, winner.value.job.leaseSessionId);
       }
+    }),
+  );
+
+  it.effect("allows only one winner when duplicated runner config starts two sessions", () =>
+    Effect.gen(function* () {
+      yield* seedDispatch();
+
+      const results = yield* Effect.all(
+        [
+          claim("runner-one", acceptedAt, firstExpiry, runnerOneSessionId),
+          claim("runner-one", acceptedAt, firstExpiry, replacementSessionId),
+        ],
+        { concurrency: "unbounded" },
+      );
+
+      assert.equal(results.filter(Option.isSome).length, 1);
+      assert.equal(results.filter(Option.isNone).length, 1);
+    }),
+  );
+
+  it.effect("reattaches the same live runner session without consuming an attempt", () =>
+    Effect.gen(function* () {
+      yield* seedDispatch();
+      const first = yield* claim("runner-one");
+      assert.isTrue(Option.isSome(first));
+
+      const reattachedAt = "2026-08-11T12:00:30.000Z";
+      const reattachedExpiry = "2026-08-11T12:01:30.000Z";
+      const reattached = yield* claim(
+        "runner-one",
+        reattachedAt,
+        reattachedExpiry,
+        runnerOneSessionId,
+      );
+      assert.isTrue(Option.isSome(reattached));
+      if (Option.isNone(reattached)) {
+        return;
+      }
+
+      assert.equal(reattached.value.job.attemptCount, 1);
+      assert.equal(reattached.value.job.fenceToken, 1);
+      assert.equal(reattached.value.job.leaseSessionId, runnerOneSessionId);
+      assert.equal(reattached.value.job.leaseExpiresAt, reattachedExpiry);
+      assert.equal(reattached.value.attempt.claimedAt, acceptedAt);
+      assert.equal(reattached.value.attempt.lastHeartbeatAt, reattachedAt);
+      assert.equal(reattached.value.attempt.leaseExpiresAt, reattachedExpiry);
+      assert.equal(reattached.value.attempt.runnerSessionId, runnerOneSessionId);
+    }),
+  );
+
+  it.effect("makes a new process session wait for expiry and then issues a new fence", () =>
+    Effect.gen(function* () {
+      yield* seedDispatch();
+      const store = yield* FoundryDispatchStore;
+      const first = yield* claim("runner-one");
+      assert.isTrue(Option.isSome(first));
+
+      const beforeExpiry = yield* claim(
+        "runner-one",
+        "2026-08-11T12:00:30.000Z",
+        "2026-08-11T12:01:30.000Z",
+        replacementSessionId,
+      );
+      assert.isTrue(Option.isNone(beforeExpiry));
+
+      const staleSessionHeartbeat = yield* Effect.flip(
+        store.heartbeat({
+          dispatchIdempotencyKey,
+          runnerId: "runner-one",
+          runnerSessionId: replacementSessionId,
+          fenceToken: 1,
+          heartbeatAt: "2026-08-11T12:00:30.000Z",
+          leaseExpiresAt: "2026-08-11T12:01:30.000Z",
+        }),
+      );
+      assert.equal(staleSessionHeartbeat._tag, "FoundryDispatchLeaseError");
+
+      const reclaimed = yield* claim("runner-one", reclaimedAt, secondExpiry, replacementSessionId);
+      assert.isTrue(Option.isSome(reclaimed));
+      if (Option.isNone(reclaimed)) {
+        return;
+      }
+      assert.equal(reclaimed.value.job.attemptCount, 2);
+      assert.equal(reclaimed.value.job.fenceToken, 2);
+      assert.equal(reclaimed.value.job.leaseSessionId, replacementSessionId);
+      assert.equal(reclaimed.value.attempt.runnerSessionId, replacementSessionId);
     }),
   );
 
@@ -151,6 +250,7 @@ layer("FoundryDispatchStore", (it) => {
         store.heartbeat({
           dispatchIdempotencyKey,
           runnerId: "runner-one",
+          runnerSessionId: runnerOneSessionId,
           fenceToken: 1,
           heartbeatAt: reclaimedAt,
           leaseExpiresAt: secondExpiry,
@@ -164,6 +264,7 @@ layer("FoundryDispatchStore", (it) => {
       const heartbeat = yield* store.heartbeat({
         dispatchIdempotencyKey,
         runnerId: "runner-two",
+        runnerSessionId: runnerTwoSessionId,
         fenceToken: 2,
         heartbeatAt: "2026-08-11T12:02:10.000Z",
         leaseExpiresAt: "2026-08-11T12:04:00.000Z",
@@ -195,6 +296,7 @@ layer("FoundryDispatchStore", (it) => {
       const evidenceInput = {
         dispatchIdempotencyKey,
         runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
         fenceToken: 1,
         reportId: "5".repeat(64),
         kind: "turn-planned",
@@ -216,6 +318,7 @@ layer("FoundryDispatchStore", (it) => {
       const completed = yield* store.complete({
         dispatchIdempotencyKey,
         runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
         fenceToken: 1,
         completedAt: "2026-08-11T12:00:20.000Z",
         outcome: "succeeded",
@@ -230,12 +333,144 @@ layer("FoundryDispatchStore", (it) => {
       const completionReplay = yield* store.complete({
         dispatchIdempotencyKey,
         runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
         fenceToken: 1,
         completedAt: "2026-08-11T12:00:30.000Z",
         outcome: "succeeded",
         failureCode: null,
       });
       assert.equal(completionReplay.job.completedAt, "2026-08-11T12:00:20.000Z");
+    }),
+  );
+
+  it.effect("atomically finalizes terminal evidence and replays the committed result", () =>
+    Effect.gen(function* () {
+      yield* seedDispatch();
+      const store = yield* FoundryDispatchStore;
+      const claimed = yield* claim("runner-one");
+      assert.isTrue(Option.isSome(claimed));
+
+      const input = {
+        dispatchIdempotencyKey,
+        runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
+        fenceToken: 1,
+        reportId: "7".repeat(64),
+        kind: "succeeded",
+        payloadJson: '{"kind":"succeeded"}',
+        recordedAt: "2026-08-11T12:00:20.000Z",
+        outcome: "succeeded",
+        failureCode: null,
+      } as const;
+      const finalized = yield* store.finalizeWithEvidence(input);
+      const replayed = yield* store.finalizeWithEvidence({
+        ...input,
+        recordedAt: "2026-08-11T12:00:30.000Z",
+      });
+
+      assert.equal(finalized.disposition, "recorded");
+      assert.equal(finalized.status.job.state, "succeeded");
+      assert.equal(finalized.status.attempts[0]?.state, "succeeded");
+      assert.equal(finalized.status.evidence.length, 1);
+      assert.equal(replayed.disposition, "replayed");
+      assert.equal(replayed.status.job.completedAt, input.recordedAt);
+      assert.equal(replayed.status.evidence.length, 1);
+      assert.deepEqual(replayed.evidence, finalized.evidence);
+    }),
+  );
+
+  it.effect("rejects stale-session evidence and terminal finalization", () =>
+    Effect.gen(function* () {
+      yield* seedDispatch();
+      const store = yield* FoundryDispatchStore;
+      const claimed = yield* claim("runner-one");
+      assert.isTrue(Option.isSome(claimed));
+
+      const evidenceInput = {
+        dispatchIdempotencyKey,
+        runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
+        fenceToken: 1,
+        reportId: "d".repeat(64),
+        kind: "turn-started",
+        payloadJson: '{"kind":"turn-started"}',
+        recordedAt: "2026-08-11T12:00:10.000Z",
+      } as const;
+      yield* store.recordEvidence(evidenceInput);
+
+      const staleEvidence = yield* store
+        .recordEvidence({ ...evidenceInput, runnerSessionId: replacementSessionId })
+        .pipe(Effect.flip);
+      const staleFinalization = yield* store
+        .finalizeWithEvidence({
+          ...evidenceInput,
+          runnerSessionId: replacementSessionId,
+          reportId: "e".repeat(64),
+          kind: "succeeded",
+          payloadJson: '{"kind":"succeeded"}',
+          outcome: "succeeded",
+          failureCode: null,
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(staleEvidence._tag, "FoundryDispatchLeaseError");
+      assert.equal(staleFinalization._tag, "FoundryDispatchLeaseError");
+      const status = yield* store.readStatus(dispatchIdempotencyKey);
+      assert.isTrue(Option.isSome(status));
+      if (Option.isSome(status)) {
+        assert.equal(status.value.job.state, "running");
+        assert.equal(status.value.attempts[0]?.state, "running");
+        assert.equal(status.value.evidence.length, 1);
+      }
+    }),
+  );
+
+  it.effect("rolls back terminal evidence and job state when attempt completion crashes", () =>
+    Effect.gen(function* () {
+      yield* seedDispatch();
+      const store = yield* FoundryDispatchStore;
+      const sql = yield* SqlClient.SqlClient;
+      const claimed = yield* claim("runner-one");
+      assert.isTrue(Option.isSome(claimed));
+
+      yield* sql`
+        CREATE TEMP TRIGGER foundry_dispatch_fail_attempt_completion
+        BEFORE UPDATE OF state ON foundry_dispatch_attempts
+        WHEN OLD.state = 'running' AND NEW.state = 'succeeded'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected terminal attempt failure');
+        END
+      `;
+      const input = {
+        dispatchIdempotencyKey,
+        runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
+        fenceToken: 1,
+        reportId: "8".repeat(64),
+        kind: "succeeded",
+        payloadJson: '{"kind":"succeeded"}',
+        recordedAt: "2026-08-11T12:00:20.000Z",
+        outcome: "succeeded",
+        failureCode: null,
+      } as const;
+      const failure = yield* store.finalizeWithEvidence(input).pipe(Effect.flip);
+      assert.equal(failure._tag, "PersistenceSqlError");
+      yield* sql`DROP TRIGGER foundry_dispatch_fail_attempt_completion`;
+
+      const rolledBack = yield* store.readStatus(dispatchIdempotencyKey);
+      assert.isTrue(Option.isSome(rolledBack));
+      if (Option.isSome(rolledBack)) {
+        assert.equal(rolledBack.value.job.state, "running");
+        assert.equal(rolledBack.value.job.completedAt, null);
+        assert.equal(rolledBack.value.attempts[0]?.state, "running");
+        assert.equal(rolledBack.value.attempts[0]?.completedAt, null);
+        assert.equal(rolledBack.value.evidence.length, 0);
+      }
+
+      const recovered = yield* store.finalizeWithEvidence(input);
+      assert.equal(recovered.disposition, "recorded");
+      assert.equal(recovered.status.job.state, "succeeded");
+      assert.equal(recovered.status.evidence.length, 1);
     }),
   );
 
@@ -276,6 +511,7 @@ it.effect("recovers the current lease, evidence, and deterministic timestamp aft
       yield* store.recordEvidence({
         dispatchIdempotencyKey,
         runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
         fenceToken: 1,
         reportId: "6".repeat(64),
         kind: "worktree-planned",

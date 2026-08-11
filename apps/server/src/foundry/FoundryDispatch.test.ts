@@ -48,6 +48,7 @@ const FOUNDER_REGISTRY_HASH = "673468a875ce32d4abc10d2a51d6746bcecd90cfda482d428
 const ACCEPTED_AT = "2026-08-11T12:00:00.000Z";
 const CLAIMED_AT = "2026-08-11T12:01:00.000Z";
 const LEASE_EXPIRES_AT = "2026-08-11T12:02:00.000Z";
+const RUNNER_SESSION_ID = "5".repeat(64);
 const decodeDispatchReportJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(FoundryDispatchReport),
 );
@@ -180,6 +181,7 @@ const runningAttempt = {
   attemptNumber: 1,
   fenceToken: 1,
   runnerId: "runner-one",
+  runnerSessionId: RUNNER_SESSION_ID,
   state: "running",
   claimedAt: CLAIMED_AT,
   lastHeartbeatAt: CLAIMED_AT,
@@ -200,6 +202,7 @@ const runningJob = {
   attemptCount: 1,
   maxAttempts: 3,
   leaseOwner: "runner-one",
+  leaseSessionId: RUNNER_SESSION_ID,
   leaseExpiresAt: LEASE_EXPIRES_AT,
   commandCreatedAt: ACCEPTED_AT,
   createdAt: ACCEPTED_AT,
@@ -247,6 +250,21 @@ function testLayer(input: {
           recordedAt: evidence.recordedAt,
         },
       }),
+    finalizeWithEvidence: (evidence) =>
+      Effect.succeed({
+        disposition: "recorded",
+        evidence: {
+          sequence: 1,
+          dispatchId: runningJob.dispatchId,
+          attemptNumber: runningAttempt.attemptNumber,
+          fenceToken: evidence.fenceToken,
+          reportId: evidence.reportId,
+          kind: evidence.kind,
+          payloadJson: evidence.payloadJson,
+          recordedAt: evidence.recordedAt,
+        },
+        status: runningStatus,
+      }),
     readStatus: () => Effect.succeed(Option.some(runningStatus)),
     ...input.dispatch,
   });
@@ -269,10 +287,12 @@ it.effect("claims with a server-owned lease and returns the raw reverified packe
     const result = yield* dispatch.claim({
       environmentId: configured.environmentId,
       runnerId: "runner-one",
+      runnerSessionId: RUNNER_SESSION_ID,
     });
 
     assert.equal(claims.length, 1);
     assert.equal(claims[0]?.claimedAt, CLAIMED_AT);
+    assert.equal(claims[0]?.runnerSessionId, RUNNER_SESSION_ID);
     assert.equal(claims[0]?.leaseExpiresAt, LEASE_EXPIRES_AT);
     assert.equal(
       Date.parse(claims[0]!.leaseExpiresAt) - Date.parse(claims[0]!.claimedAt),
@@ -283,6 +303,8 @@ it.effect("claims with a server-owned lease and returns the raw reverified packe
     assert.equal(result.claim?.job.dispatchIdempotencyKey, queued.idempotencyKey);
     assert.equal(result.claim?.attempt.fenceToken, 1);
     assert.notProperty(result.claim?.job, "leaseOwner");
+    assert.notProperty(result.claim?.job, "leaseSessionId");
+    assert.notProperty(result.claim?.attempt, "runnerSessionId");
   }).pipe(
     Effect.provide(
       testLayer({
@@ -327,13 +349,18 @@ it.effect("fails a claimed job when its stored founder proof no longer verifies"
     const dispatch = yield* FoundryDispatch;
     yield* TestClock.setTime(Date.parse(CLAIMED_AT));
     const error = yield* dispatch
-      .claim({ environmentId: configured.environmentId, runnerId: "runner-one" })
+      .claim({
+        environmentId: configured.environmentId,
+        runnerId: "runner-one",
+        runnerSessionId: RUNNER_SESSION_ID,
+      })
       .pipe(Effect.flip);
 
     assert.equal(error.code, "conflict");
     assert.equal(completions.length, 1);
     assert.equal(completions[0]?.outcome, "failed");
     assert.equal(completions[0]?.failureCode, "approval-invalid");
+    assert.equal(completions[0]?.runnerSessionId, RUNNER_SESSION_ID);
   }).pipe(
     Effect.provide(
       testLayer({
@@ -360,12 +387,14 @@ it.effect("renews only the current fenced lease and maps stale ownership coarsel
     const renewed = yield* dispatch.heartbeat({
       dispatchIdempotencyKey: queued.idempotencyKey,
       runnerId: "runner-one",
+      runnerSessionId: RUNNER_SESSION_ID,
       fenceToken: 1,
     });
     const error = yield* dispatch
       .heartbeat({
         dispatchIdempotencyKey: queued.idempotencyKey,
-        runnerId: "stale-runner",
+        runnerId: "runner-one",
+        runnerSessionId: "6".repeat(64),
         fenceToken: 1,
       })
       .pipe(Effect.flip);
@@ -380,7 +409,7 @@ it.effect("renews only the current fenced lease and maps stale ownership coarsel
         dispatch: {
           heartbeat: (input) => {
             heartbeats.push(input);
-            return input.runnerId === "runner-one"
+            return input.runnerSessionId === RUNNER_SESSION_ID
               ? Effect.succeed({
                   job: { ...runningJob, leaseExpiresAt: input.leaseExpiresAt },
                   attempt: { ...runningAttempt, leaseExpiresAt: input.leaseExpiresAt },
@@ -398,79 +427,75 @@ it.effect("renews only the current fenced lease and maps stale ownership coarsel
   );
 });
 
-it.effect(
-  "persists typed evidence before terminal completion and preserves replay disposition",
-  () => {
-    const reports: Parameters<FoundryDispatchStoreShape["recordEvidence"]>[0][] = [];
-    const completions: Parameters<FoundryDispatchStoreShape["complete"]>[0][] = [];
-    const succeeded: FoundryDispatchReport = {
-      kind: "succeeded",
-      evidenceKey: "8".repeat(64),
-      threadId: ThreadId.make("foundry-thread-1"),
-      commandId: CommandId.make("foundry-command-1"),
-      turnId: TurnId.make("turn-1"),
-      checkpoint: {
-        status: "ready",
-        checkpointRef: CheckpointRef.make("refs/t3/checkpoints/foundry-thread-1/turn/1"),
-      },
-    };
+it.effect("atomically finalizes typed terminal evidence and preserves replay disposition", () => {
+  const finalizations: Parameters<FoundryDispatchStoreShape["finalizeWithEvidence"]>[0][] = [];
+  const succeeded: FoundryDispatchReport = {
+    kind: "succeeded",
+    evidenceKey: "8".repeat(64),
+    threadId: ThreadId.make("foundry-thread-1"),
+    commandId: CommandId.make("foundry-command-1"),
+    turnId: TurnId.make("turn-1"),
+    checkpoint: {
+      status: "ready",
+      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/foundry-thread-1/turn/1"),
+    },
+  };
 
-    return Effect.gen(function* () {
-      const dispatch = yield* FoundryDispatch;
-      yield* TestClock.setTime(Date.parse(CLAIMED_AT));
-      const result = yield* dispatch.report({
-        dispatchIdempotencyKey: queued.idempotencyKey,
-        runnerId: "runner-one",
-        fenceToken: 1,
-        reportId: "9".repeat(64),
-        report: succeeded,
-      });
+  return Effect.gen(function* () {
+    const dispatch = yield* FoundryDispatch;
+    yield* TestClock.setTime(Date.parse(CLAIMED_AT));
+    const result = yield* dispatch.report({
+      dispatchIdempotencyKey: queued.idempotencyKey,
+      runnerId: "runner-one",
+      runnerSessionId: RUNNER_SESSION_ID,
+      fenceToken: 1,
+      reportId: "9".repeat(64),
+      report: succeeded,
+    });
 
-      assert.equal(result.disposition, "replayed");
-      assert.equal(result.job.state, "succeeded");
-      assert.equal(result.job.evidence[0]?.report.kind, "succeeded");
-      assert.equal(reports.length, 1);
-      assert.equal(reports[0]?.kind, "succeeded");
-      assert.deepEqual(decodeDispatchReportJson(reports[0]!.payloadJson), succeeded);
-      assert.equal(completions.length, 1);
-      assert.equal(completions[0]?.outcome, "succeeded");
-      assert.equal(completions[0]?.failureCode, null);
-    }).pipe(
-      Effect.provide(
-        testLayer({
-          dispatch: {
-            recordEvidence: (input) => {
-              reports.push(input);
-              return Effect.succeed({
-                disposition: "replayed",
-                evidence: {
-                  sequence: 1,
-                  dispatchId: runningJob.dispatchId,
-                  attemptNumber: 1,
-                  fenceToken: input.fenceToken,
-                  reportId: input.reportId,
-                  kind: input.kind,
-                  payloadJson: input.payloadJson,
-                  recordedAt: input.recordedAt,
-                },
-              });
-            },
-            complete: (input) => {
-              completions.push(input);
-              return Effect.succeed({
+    assert.equal(result.disposition, "replayed");
+    assert.equal(result.job.state, "succeeded");
+    assert.equal(result.job.evidence[0]?.report.kind, "succeeded");
+    assert.equal(finalizations.length, 1);
+    assert.equal(finalizations[0]?.kind, "succeeded");
+    assert.equal(finalizations[0]?.runnerSessionId, RUNNER_SESSION_ID);
+    assert.deepEqual(decodeDispatchReportJson(finalizations[0]!.payloadJson), succeeded);
+    assert.equal(finalizations[0]?.outcome, "succeeded");
+    assert.equal(finalizations[0]?.failureCode, null);
+  }).pipe(
+    Effect.provide(
+      testLayer({
+        dispatch: {
+          recordEvidence: () => Effect.die("terminal report used non-atomic evidence path"),
+          complete: () => Effect.die("terminal report used non-atomic completion path"),
+          finalizeWithEvidence: (input) => {
+            finalizations.push(input);
+            return Effect.succeed({
+              disposition: "replayed",
+              evidence: {
+                sequence: 1,
+                dispatchId: runningJob.dispatchId,
+                attemptNumber: 1,
+                fenceToken: input.fenceToken,
+                reportId: input.reportId,
+                kind: input.kind,
+                payloadJson: input.payloadJson,
+                recordedAt: input.recordedAt,
+              },
+              status: {
                 job: {
                   ...runningJob,
                   state: "succeeded",
                   leaseOwner: null,
                   leaseExpiresAt: null,
-                  updatedAt: input.completedAt,
-                  completedAt: input.completedAt,
+                  updatedAt: input.recordedAt,
+                  completedAt: input.recordedAt,
                 },
                 attempts: [
                   {
                     ...runningAttempt,
                     state: "succeeded",
-                    completedAt: input.completedAt,
+                    completedAt: input.recordedAt,
                   },
                 ],
                 evidence: [
@@ -482,17 +507,17 @@ it.effect(
                     reportId: "9".repeat(64),
                     kind: succeeded.kind,
                     payloadJson: JSON.stringify(succeeded),
-                    recordedAt: input.completedAt,
+                    recordedAt: input.recordedAt,
                   },
                 ],
-              });
-            },
+              },
+            });
           },
-        }),
-      ),
-    );
-  },
-);
+        },
+      }),
+    ),
+  );
+});
 
 it.effect("decodes status evidence and never exposes malformed stored diagnostics", () => {
   const malformedStatus: StoredFoundryDispatchStatus = {
@@ -535,6 +560,7 @@ it.effect("maps evidence conflicts without returning stored payloads", () =>
       .report({
         dispatchIdempotencyKey: queued.idempotencyKey,
         runnerId: "runner-one",
+        runnerSessionId: RUNNER_SESSION_ID,
         fenceToken: 1,
         reportId: "b".repeat(64),
         report: {
@@ -551,7 +577,7 @@ it.effect("maps evidence conflicts without returning stored payloads", () =>
     Effect.provide(
       testLayer({
         dispatch: {
-          recordEvidence: (input) =>
+          finalizeWithEvidence: (input) =>
             Effect.fail(
               new FoundryDispatchEvidenceConflictError({
                 dispatchIdempotencyKey: input.dispatchIdempotencyKey,
