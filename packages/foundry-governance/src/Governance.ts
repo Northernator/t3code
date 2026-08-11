@@ -1,46 +1,25 @@
 import { sha256 as sha256Bytes } from "@noble/hashes/sha2";
+import {
+  decodeFoundryFeatureContractBody,
+  type FoundryApprovalProof,
+  type FoundryFeatureContractBody,
+  type FoundryRuntimeMode as ContractFoundryRuntimeMode,
+} from "@t3tools/contracts";
 
-export type FoundryRuntimeMode = "approval-required";
+export type FoundryRuntimeMode = ContractFoundryRuntimeMode;
+export type FeatureContractBody = FoundryFeatureContractBody;
 
 export interface FounderIdentity {
   readonly id: string;
   readonly publicKey: string;
 }
 
-export interface FeatureContractBody {
-  readonly schemaVersion: 1;
-  readonly projectId: string;
-  readonly featureId: string;
-  readonly version: number;
-  readonly title: string;
-  readonly objective: string;
-  readonly inScope: ReadonlyArray<string>;
-  readonly outOfScope: ReadonlyArray<string>;
-  readonly constraints: ReadonlyArray<string>;
-  readonly acceptanceCriteria: ReadonlyArray<string>;
-  readonly verificationCommands: ReadonlyArray<string>;
-  readonly repository: {
-    readonly remoteId: string;
-    readonly baseBranch: string;
-    readonly baseSha: string;
-  };
-  readonly execution: {
-    readonly environmentId: string;
-    readonly provider: string;
-    readonly model: string;
-    readonly runtimeMode: FoundryRuntimeMode;
-    readonly limits: {
-      readonly maximumTurns: number;
-      readonly maximumRetries: number;
-    };
-  };
-  readonly riskFlags: ReadonlyArray<string>;
-}
+export type FounderRegistry = readonly [FounderIdentity, FounderIdentity];
 
 export interface FounderApproval {
   readonly founderId: string;
   readonly contentHash: string;
-  readonly signature: string;
+  readonly proof: FoundryApprovalProof;
 }
 
 export interface FeatureProposal {
@@ -48,6 +27,8 @@ export interface FeatureProposal {
   readonly canonicalBody: string;
   readonly contentHash: string;
   readonly approvalSubject: string;
+  readonly founderRegistry: FounderRegistry;
+  readonly founderRegistryHash: string;
   readonly founderIds: readonly [string, string];
   readonly approvals: ReadonlyArray<FounderApproval>;
   readonly state: "awaiting-approval" | "approved";
@@ -78,21 +59,22 @@ export interface FoundryDispatch {
   readonly state: "queued";
 }
 
-export interface ApprovalSignatureVerifier {
+export interface ApprovalProofVerifier {
   readonly verify: (input: {
     readonly founder: FounderIdentity;
     readonly subject: string;
-    readonly signature: string;
+    readonly proof: FoundryApprovalProof;
   }) => boolean;
 }
 
 export type FoundryGovernanceErrorCode =
   | "invalid-contract"
   | "invalid-founder-set"
+  | "founder-registry-mismatch"
   | "proposal-integrity"
   | "unknown-founder"
   | "hash-mismatch"
-  | "invalid-signature"
+  | "invalid-approval-proof"
   | "duplicate-approval"
   | "already-approved"
   | "contract-not-approved"
@@ -200,6 +182,20 @@ export function sha256(value: string): string {
 export function approvalSubjectFor(input: {
   readonly body: FeatureContractBody;
   readonly contentHash: string;
+  readonly founders: ReadonlyArray<FounderIdentity>;
+}): string {
+  const founderRegistryHash = hashFounderRegistry(validateFounders(input.founders));
+  return approvalSubjectForRegistry({
+    body: input.body,
+    contentHash: input.contentHash,
+    founderRegistryHash,
+  });
+}
+
+function approvalSubjectForRegistry(input: {
+  readonly body: FeatureContractBody;
+  readonly contentHash: string;
+  readonly founderRegistryHash: string;
 }): string {
   return [
     "foundry.contract.approve/v1",
@@ -207,6 +203,7 @@ export function approvalSubjectFor(input: {
     input.body.featureId,
     String(input.body.version),
     input.contentHash,
+    input.founderRegistryHash,
   ].join("\n");
 }
 
@@ -216,62 +213,98 @@ function requireNonEmpty(field: string, value: string): void {
   }
 }
 
-function validateContract(body: FeatureContractBody): void {
-  if (body.schemaVersion !== 1) {
-    fail("invalid-contract", "schemaVersion must be 1.");
-  }
-  requireNonEmpty("projectId", body.projectId);
-  requireNonEmpty("title", body.title);
-  requireNonEmpty("objective", body.objective);
-  requireNonEmpty("repository.remoteId", body.repository.remoteId);
-  requireNonEmpty("repository.baseBranch", body.repository.baseBranch);
-  requireNonEmpty("repository.baseSha", body.repository.baseSha);
-  requireNonEmpty("execution.environmentId", body.execution.environmentId);
-  requireNonEmpty("execution.provider", body.execution.provider);
-  requireNonEmpty("execution.model", body.execution.model);
-
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(body.featureId)) {
-    fail(
-      "invalid-contract",
-      "featureId must be a lowercase, dash-separated identifier of at most 64 characters.",
-    );
-  }
-  if (!Number.isInteger(body.version) || body.version < 1) {
-    fail("invalid-contract", "version must be a positive integer.");
-  }
-  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(body.repository.baseSha)) {
-    fail("invalid-contract", "repository.baseSha must be a complete Git object ID.");
-  }
-  if (body.execution.runtimeMode !== "approval-required") {
-    fail("invalid-contract", "Foundry v0.1 only permits approval-required execution.");
-  }
-  if (
-    !Number.isInteger(body.execution.limits.maximumTurns) ||
-    body.execution.limits.maximumTurns < 1
-  ) {
-    fail("invalid-contract", "execution.limits.maximumTurns must be a positive integer.");
-  }
-  if (
-    !Number.isInteger(body.execution.limits.maximumRetries) ||
-    body.execution.limits.maximumRetries < 0
-  ) {
-    fail("invalid-contract", "execution.limits.maximumRetries must be a non-negative integer.");
+function validatedContractBody(body: FeatureContractBody): FeatureContractBody {
+  try {
+    return decodeFoundryFeatureContractBody(body);
+  } catch {
+    return fail("invalid-contract", "The feature contract does not match the strict wire schema.");
   }
 }
 
-function validateFounders(founders: ReadonlyArray<FounderIdentity>): readonly [string, string] {
-  if (founders.length !== 2) {
+function validateFounders(founders: ReadonlyArray<FounderIdentity>): FounderRegistry {
+  if (!Array.isArray(founders) || founders.length !== 2) {
     fail("invalid-founder-set", "Foundry v0.1 requires exactly two founders.");
   }
   const [first, second] = founders;
-  if (!first || !second || first.id === second.id || first.publicKey === second.publicKey) {
+  if (
+    !first ||
+    !second ||
+    typeof first.id !== "string" ||
+    typeof first.publicKey !== "string" ||
+    typeof second.id !== "string" ||
+    typeof second.publicKey !== "string" ||
+    first.id === second.id ||
+    first.publicKey === second.publicKey
+  ) {
     fail("invalid-founder-set", "The two founders must have distinct identities and signing keys.");
   }
   requireNonEmpty("founder.id", first.id);
   requireNonEmpty("founder.publicKey", first.publicKey);
   requireNonEmpty("founder.id", second.id);
   requireNonEmpty("founder.publicKey", second.publicKey);
-  return [first.id, second.id];
+  const registry: [FounderIdentity, FounderIdentity] = [
+    Object.freeze({ id: first.id, publicKey: first.publicKey }),
+    Object.freeze({ id: second.id, publicKey: second.publicKey }),
+  ];
+  return Object.freeze(registry);
+}
+
+function hashFounderRegistry(founders: FounderRegistry): string {
+  return sha256(canonicalizeJson(founders));
+}
+
+function founderRegistriesMatch(left: FounderRegistry, right: FounderRegistry): boolean {
+  return (
+    left[0].id === right[0].id &&
+    left[0].publicKey === right[0].publicKey &&
+    left[1].id === right[1].id &&
+    left[1].publicKey === right[1].publicKey
+  );
+}
+
+function assertProposalEnvelopeIntegrity(proposal: FeatureProposal): FounderRegistry {
+  const body = validatedContractBody(proposal.body);
+  const canonicalBody = canonicalizeJson(body);
+  const contentHash = sha256(canonicalBody);
+  let founderRegistry: FounderRegistry;
+  try {
+    founderRegistry = validateFounders(proposal.founderRegistry);
+  } catch {
+    return fail("proposal-integrity", "The proposal founder registry is invalid.");
+  }
+  const founderRegistryHash = hashFounderRegistry(founderRegistry);
+  const founderIds = founderRegistry.map(({ id }) => id);
+  const approvalSubject = approvalSubjectForRegistry({ body, contentHash, founderRegistryHash });
+  const expectedState = proposal.approvals.length === 2 ? "approved" : "awaiting-approval";
+
+  if (
+    canonicalBody !== proposal.canonicalBody ||
+    contentHash !== proposal.contentHash ||
+    founderRegistryHash !== proposal.founderRegistryHash ||
+    proposal.founderIds.length !== 2 ||
+    founderIds.some((founderId, index) => founderId !== proposal.founderIds[index]) ||
+    approvalSubject !== proposal.approvalSubject ||
+    proposal.approvals.length > 2 ||
+    proposal.state !== expectedState
+  ) {
+    fail("proposal-integrity", "The proposal envelope does not match its trusted inputs.");
+  }
+
+  return founderRegistry;
+}
+
+function assertActiveFounderRegistry(
+  proposalRegistry: FounderRegistry,
+  founders: ReadonlyArray<FounderIdentity>,
+): FounderRegistry {
+  const activeRegistry = validateFounders(founders);
+  if (!founderRegistriesMatch(proposalRegistry, activeRegistry)) {
+    fail(
+      "founder-registry-mismatch",
+      "The active founder identities or signing keys differ from the proposal registry.",
+    );
+  }
+  return activeRegistry;
 }
 
 function frozenContractBody(canonicalBody: string): FeatureContractBody {
@@ -292,16 +325,21 @@ export function proposeFeatureContract(input: {
   readonly body: FeatureContractBody;
   readonly founders: ReadonlyArray<FounderIdentity>;
 }): FeatureProposal {
-  validateContract(input.body);
-  const founderIds = validateFounders(input.founders);
-  const canonicalBody = canonicalizeJson(input.body);
+  const body = validatedContractBody(input.body);
+  const founderRegistry = validateFounders(input.founders);
+  const founderRegistryHash = hashFounderRegistry(founderRegistry);
+  const founderIds: [string, string] = [founderRegistry[0].id, founderRegistry[1].id];
+  Object.freeze(founderIds);
+  const canonicalBody = canonicalizeJson(body);
   const contentHash = sha256(canonicalBody);
 
   return Object.freeze({
     body: frozenContractBody(canonicalBody),
     canonicalBody,
     contentHash,
-    approvalSubject: approvalSubjectFor({ body: input.body, contentHash }),
+    approvalSubject: approvalSubjectForRegistry({ body, contentHash, founderRegistryHash }),
+    founderRegistry,
+    founderRegistryHash,
     founderIds,
     approvals: Object.freeze([]),
     state: "awaiting-approval",
@@ -312,8 +350,9 @@ export function approveFeatureContract(input: {
   readonly proposal: FeatureProposal;
   readonly approval: FounderApproval;
   readonly founders: ReadonlyArray<FounderIdentity>;
-  readonly verifier: ApprovalSignatureVerifier;
+  readonly verifier: ApprovalProofVerifier;
 }): FeatureProposal {
+  const proposalRegistry = assertProposalEnvelopeIntegrity(input.proposal);
   if (input.proposal.state === "approved") {
     fail("already-approved", "This exact contract is already fully approved.");
   }
@@ -323,11 +362,27 @@ export function approveFeatureContract(input: {
   if (!input.proposal.founderIds.includes(input.approval.founderId)) {
     fail("unknown-founder", "Only a founder registered on this proposal may approve it.");
   }
+  const activeRegistry = assertActiveFounderRegistry(proposalRegistry, input.founders);
   if (input.proposal.approvals.some(({ founderId }) => founderId === input.approval.founderId)) {
     fail("duplicate-approval", "A founder may approve a contract hash only once.");
   }
 
-  const founder = input.founders.find(({ id }) => id === input.approval.founderId);
+  for (const existingApproval of input.proposal.approvals) {
+    const existingFounder = activeRegistry.find(({ id }) => id === existingApproval.founderId);
+    if (
+      !existingFounder ||
+      existingApproval.contentHash !== input.proposal.contentHash ||
+      !input.verifier.verify({
+        founder: existingFounder,
+        subject: input.proposal.approvalSubject,
+        proof: existingApproval.proof,
+      })
+    ) {
+      fail("invalid-approval-proof", "An existing approval proof is no longer valid.");
+    }
+  }
+
+  const founder = activeRegistry.find(({ id }) => id === input.approval.founderId);
   if (!founder || !input.proposal.founderIds.includes(founder.id)) {
     fail("unknown-founder", "The approval founder is not in the active founder registry.");
   }
@@ -335,13 +390,17 @@ export function approveFeatureContract(input: {
     !input.verifier.verify({
       founder,
       subject: input.proposal.approvalSubject,
-      signature: input.approval.signature,
+      proof: input.approval.proof,
     })
   ) {
-    fail("invalid-signature", "The approval signature is invalid for this contract.");
+    fail("invalid-approval-proof", "The approval proof is invalid for this contract.");
   }
 
-  const approvals = Object.freeze([...input.proposal.approvals, Object.freeze(input.approval)]);
+  const approval = Object.freeze({
+    ...input.approval,
+    proof: Object.freeze({ ...input.approval.proof }),
+  });
+  const approvals = Object.freeze([...input.proposal.approvals, approval]);
   return Object.freeze({
     ...input.proposal,
     approvals,
@@ -352,7 +411,7 @@ export function approveFeatureContract(input: {
 export function verifyApprovedFeatureProposal(input: {
   readonly proposal: FeatureProposal;
   readonly founders: ReadonlyArray<FounderIdentity>;
-  readonly verifier: ApprovalSignatureVerifier;
+  readonly verifier: ApprovalProofVerifier;
 }): VerifiedFeatureProposal {
   if (input.proposal.state !== "approved" || input.proposal.approvals.length !== 2) {
     fail("contract-not-approved", "A dispatchable proposal must contain exactly two approvals.");
@@ -366,6 +425,8 @@ export function verifyApprovedFeatureProposal(input: {
     reconstructed.canonicalBody !== input.proposal.canonicalBody ||
     reconstructed.contentHash !== input.proposal.contentHash ||
     reconstructed.approvalSubject !== input.proposal.approvalSubject ||
+    reconstructed.founderRegistryHash !== input.proposal.founderRegistryHash ||
+    !founderRegistriesMatch(reconstructed.founderRegistry, input.proposal.founderRegistry) ||
     reconstructed.founderIds.some(
       (founderId, index) => founderId !== input.proposal.founderIds[index],
     )

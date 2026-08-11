@@ -1,6 +1,6 @@
 import {
   approveFeatureContract,
-  type ApprovalSignatureVerifier,
+  type ApprovalProofVerifier,
   type FeatureContractBody,
   type FounderIdentity,
   proposeFeatureContract,
@@ -49,8 +49,9 @@ const body: FeatureContractBody = {
   riskFlags: ["clipboard-data"],
 };
 
-const verifier: ApprovalSignatureVerifier = {
-  verify: ({ founder, subject, signature }) => signature === `${founder.publicKey}:${subject}`,
+const verifier: ApprovalProofVerifier = {
+  verify: ({ founder, subject, proof }) =>
+    proof.format === "test/v1" && proof.encodedEvent === `${founder.publicKey}:${subject}`,
 };
 
 const binding: LocalRunnerBinding = {
@@ -72,7 +73,10 @@ function approvedRun() {
     approval: {
       founderId: founders[0].id,
       contentHash: proposal.contentHash,
-      signature: `${founders[0].publicKey}:${proposal.approvalSubject}`,
+      proof: {
+        format: "test/v1",
+        encodedEvent: `${founders[0].publicKey}:${proposal.approvalSubject}`,
+      },
     },
     founders,
     verifier,
@@ -82,7 +86,10 @@ function approvedRun() {
     approval: {
       founderId: founders[1].id,
       contentHash: proposal.contentHash,
-      signature: `${founders[1].publicKey}:${proposal.approvalSubject}`,
+      proof: {
+        format: "test/v1",
+        encodedEvent: `${founders[1].publicKey}:${proposal.approvalSubject}`,
+      },
     },
     founders,
     verifier,

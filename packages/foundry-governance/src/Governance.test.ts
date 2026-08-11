@@ -12,7 +12,7 @@ import {
   proposeFeatureContract,
   queueFeatureDispatch,
   verifyApprovedFeatureProposal,
-  type ApprovalSignatureVerifier,
+  type ApprovalProofVerifier,
   type VerifiedFeatureProposal,
 } from "./Governance.ts";
 
@@ -51,15 +51,19 @@ const body: FeatureContractBody = {
   riskFlags: ["clipboard-data"],
 };
 
-const verifier: ApprovalSignatureVerifier = {
-  verify: ({ founder, subject, signature }) => signature === `${founder.publicKey}:${subject}`,
+const verifier: ApprovalProofVerifier = {
+  verify: ({ founder, subject, proof }) =>
+    proof.format === "test/v1" && proof.encodedEvent === `${founder.publicKey}:${subject}`,
 };
 
 function approvalFor(proposal: FeatureProposal, founder: FounderIdentity): FounderApproval {
   return {
     founderId: founder.id,
     contentHash: proposal.contentHash,
-    signature: `${founder.publicKey}:${proposal.approvalSubject}`,
+    proof: {
+      format: "test/v1",
+      encodedEvent: `${founder.publicKey}:${proposal.approvalSubject}`,
+    },
   };
 }
 
@@ -172,6 +176,52 @@ describe("Foundry governance", () => {
     );
   });
 
+  it("binds approvals to an immutable founder registry", () => {
+    const proposed = proposeFeatureContract({ body, founders });
+    const aliceApproved = approveFeatureContract({
+      proposal: proposed,
+      approval: approvalFor(proposed, founders[0]),
+      founders,
+      verifier,
+    });
+    const eve = { id: "founder-eve", publicKey: "eve-public-key" };
+    const rotatedFounders = [founders[0], eve] as const;
+    const rotated = proposeFeatureContract({ body, founders: rotatedFounders });
+
+    expect(Object.isFrozen(proposed.founderIds)).toBe(true);
+    expect(Object.isFrozen(proposed.founderRegistry)).toBe(true);
+    expect(Object.isFrozen(proposed.founderRegistry[0])).toBe(true);
+    expect(rotated.approvalSubject).not.toBe(proposed.approvalSubject);
+    expectGovernanceError(
+      () =>
+        approveFeatureContract({
+          proposal: aliceApproved,
+          approval: approvalFor(aliceApproved, founders[1]),
+          founders: [founders[0], { ...founders[1], publicKey: "rotated-bob-key" }],
+          verifier,
+        }),
+      "founder-registry-mismatch",
+    );
+
+    const substitutedProposal: FeatureProposal = {
+      ...aliceApproved,
+      approvalSubject: rotated.approvalSubject,
+      founderRegistry: rotated.founderRegistry,
+      founderRegistryHash: rotated.founderRegistryHash,
+      founderIds: rotated.founderIds,
+    };
+    expectGovernanceError(
+      () =>
+        approveFeatureContract({
+          proposal: substitutedProposal,
+          approval: approvalFor(substitutedProposal, eve),
+          founders: rotatedFounders,
+          verifier,
+        }),
+      "invalid-approval-proof",
+    );
+  });
+
   it("needs one valid approval from each founder", () => {
     const proposed = proposeFeatureContract({ body, founders });
     const aliceApproved = approveFeatureContract({
@@ -225,11 +275,14 @@ describe("Foundry governance", () => {
       () =>
         approveFeatureContract({
           proposal: proposed,
-          approval: { ...approvalFor(proposed, founders[0]), signature: "forged" },
+          approval: {
+            ...approvalFor(proposed, founders[0]),
+            proof: { format: "test/v1", encodedEvent: "forged" },
+          },
           founders,
           verifier,
         }),
-      "invalid-signature",
+      "invalid-approval-proof",
     );
   });
 
@@ -259,12 +312,18 @@ describe("Foundry governance", () => {
         verifyApprovedFeatureProposal({
           proposal: {
             ...approved,
-            approvals: [approved.approvals[0]!, { ...approved.approvals[1]!, signature: "forged" }],
+            approvals: [
+              approved.approvals[0]!,
+              {
+                ...approved.approvals[1]!,
+                proof: { format: "test/v1", encodedEvent: "forged" },
+              },
+            ],
           },
           founders,
           verifier,
         }),
-      "invalid-signature",
+      "invalid-approval-proof",
     );
   });
 
