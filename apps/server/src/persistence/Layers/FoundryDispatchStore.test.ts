@@ -343,6 +343,39 @@ layer("FoundryDispatchStore", (it) => {
     }),
   );
 
+  it.effect("rejects same-session evidence replay after the running lease expires", () =>
+    Effect.gen(function* () {
+      yield* seedDispatch();
+      const store = yield* FoundryDispatchStore;
+      const claimed = yield* claim("runner-one");
+      assert.isTrue(Option.isSome(claimed));
+
+      const evidenceInput = {
+        dispatchIdempotencyKey,
+        runnerId: "runner-one",
+        runnerSessionId: runnerOneSessionId,
+        fenceToken: 1,
+        reportId: "6".repeat(64),
+        kind: "turn-planned",
+        payloadJson: '{"kind":"turn-planned"}',
+        recordedAt: "2026-08-11T12:00:10.000Z",
+      } as const;
+      yield* store.recordEvidence(evidenceInput);
+
+      const replayAfterExpiry = yield* store
+        .recordEvidence({
+          ...evidenceInput,
+          recordedAt: "2026-08-11T12:01:00.000Z",
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(replayAfterExpiry._tag, "FoundryDispatchLeaseError");
+      if (replayAfterExpiry._tag === "FoundryDispatchLeaseError") {
+        assert.equal(replayAfterExpiry.reason, "lease-lost");
+      }
+    }),
+  );
+
   it.effect("atomically finalizes terminal evidence and replays the committed result", () =>
     Effect.gen(function* () {
       yield* seedDispatch();

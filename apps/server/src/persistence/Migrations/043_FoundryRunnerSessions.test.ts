@@ -9,7 +9,7 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
 layer("043_FoundryRunnerSessions", (it) => {
-  it.effect("adds session fencing and expires leases that predate session ownership", () =>
+  it.effect("adds session fencing without shortening active legacy leases", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* sql`PRAGMA foreign_keys = ON`;
@@ -128,7 +128,7 @@ layer("043_FoundryRunnerSessions", (it) => {
       `;
 
       assert.deepEqual(jobs, [
-        { leaseExpiresAt: "1970-01-01T00:00:00.000Z", leaseSessionId: null },
+        { leaseExpiresAt: "2099-01-01T00:00:00.000Z", leaseSessionId: null },
       ]);
       assert.deepEqual(attempts, [{ runnerSessionId: null }]);
 

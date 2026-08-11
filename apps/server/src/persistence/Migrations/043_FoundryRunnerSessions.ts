@@ -1,8 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-const EXPIRED_LEGACY_LEASE = "1970-01-01T00:00:00.000Z";
-
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -14,15 +12,6 @@ export default Effect.gen(function* () {
   yield* sql`
     ALTER TABLE foundry_dispatch_attempts
     ADD COLUMN runner_session_id TEXT
-  `;
-
-  // A pre-session lease has no safe reattachment credential. Expiring it
-  // forces the next runner process through the normal fenced reclaim path.
-  yield* sql`
-    UPDATE foundry_dispatch_jobs
-    SET lease_expires_at = ${EXPIRED_LEGACY_LEASE}
-    WHERE state = 'running'
-      AND lease_session_id IS NULL
   `;
 
   yield* sql`

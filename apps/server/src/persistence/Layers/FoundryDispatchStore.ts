@@ -728,7 +728,12 @@ const makeFoundryDispatchStore = Effect.gen(function* () {
         }
         if (
           job.value.attemptCount !== existing.value.attemptNumber ||
-          job.value.fenceToken !== input.fenceToken
+          job.value.fenceToken !== input.fenceToken ||
+          (job.value.state === "running" &&
+            (job.value.leaseOwner !== input.runnerId ||
+              job.value.leaseSessionId !== input.runnerSessionId ||
+              job.value.leaseExpiresAt === null ||
+              job.value.leaseExpiresAt <= input.recordedAt))
         ) {
           return yield* leaseLost(input.dispatchIdempotencyKey);
         }
